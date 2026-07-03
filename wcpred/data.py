@@ -1,0 +1,91 @@
+"""wcpred.data — fetch/load/normalize historical results + per-team reshaping."""
+
+import os
+import numpy as np
+import pandas as pd
+import requests
+
+CACHE_DIR = "data_cache"
+RESULTS_URL = "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
+
+# normalizes the historical results.csv team names
+NAME_MAP = {
+    "USA": "United States", "Korea Republic": "South Korea",
+    "Republic of Ireland": "Ireland", "Türkiye": "Turkey",
+    "Cape Verde": "Cabo Verde", "Côte d'Ivoire": "Ivory Coast",
+    "Czechia": "Czech Republic", "Curaçao": "Curacao",
+    "Congo DR": "DR Congo", "Congo": "Republic of the Congo",
+}
+
+# maps fixtures.csv team names -> the normalized results.csv names
+FIXTURE_NAME_MAP = {
+    "IR Iran": "Iran", "Korea Republic": "South Korea", "Türkiye": "Turkey",
+    "Congo DR": "DR Congo", "Côte d'Ivoire": "Ivory Coast",
+    "Czechia": "Czech Republic", "Curaçao": "Curacao", "USA": "United States",
+    "Cape Verde": "Cabo Verde",
+}
+
+
+# ── data loading ────────────────────────────────────────────────────────────────
+def fetch_results():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, "results.csv")
+    if not os.path.exists(path):
+        resp = requests.get(RESULTS_URL, timeout=120)
+        resp.raise_for_status()
+        with open(path, "wb") as fh:
+            fh.write(resp.content)
+    return pd.read_csv(path)
+
+
+def normalize_country(name):
+    return NAME_MAP.get(name, name) if isinstance(name, str) else name
+
+
+def load_results():
+    r = fetch_results()
+    r["home_team"] = r["home_team"].map(normalize_country)
+    r["away_team"] = r["away_team"].map(normalize_country)
+    r["date"] = pd.to_datetime(r["date"])
+    r = r.dropna(subset=["home_score", "away_score"]).copy()
+    r["home_score"] = r["home_score"].astype(int)
+    r["away_score"] = r["away_score"].astype(int)
+    r["neutral"] = r["neutral"].astype(str).str.upper().eq("TRUE").astype(int)
+    return r.sort_values("date").reset_index(drop=True)
+
+
+def tournament_weight(name):
+    t = str(name).lower()
+    if "fifa world cup" in t and "qualif" not in t:
+        return 4
+    if "qualif" in t:
+        return 3
+    big = ["uefa nations", "copa america", "afc asian cup", "africa cup",
+           "concacaf", "uefa euro", "confederations"]
+    if any(tok in t for tok in big):
+        return 3
+    if "friendly" in t:
+        return 1
+    return 2
+
+
+def add_label_and_context(r):
+    r = r.copy()
+    r["label"] = np.where(r["home_score"] > r["away_score"], 0,
+                          np.where(r["home_score"] == r["away_score"], 1, 2))
+    r["tournament_weight"] = r["tournament"].map(tournament_weight)
+    return r
+
+
+def per_team_long(r):
+    home = pd.DataFrame({"date": r["date"].values, "team": r["home_team"].values,
+                         "opp": r["away_team"].values, "gf": r["home_score"].values,
+                         "ga": r["away_score"].values})
+    away = pd.DataFrame({"date": r["date"].values, "team": r["away_team"].values,
+                         "opp": r["home_team"].values, "gf": r["away_score"].values,
+                         "ga": r["home_score"].values})
+    long = pd.concat([home, away], ignore_index=True)
+    long["result"] = np.where(long["gf"] > long["ga"], 1.0,
+                              np.where(long["gf"] == long["ga"], 0.5, 0.0))
+    long["gd"] = long["gf"] - long["ga"]
+    return long
