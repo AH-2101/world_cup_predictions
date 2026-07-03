@@ -116,7 +116,8 @@ def _slots_for_date(results, date_str):
             if not slot["resolved_home"] or not slot["resolved_away"]:
                 continue
             row = meta.get(slot["match_number"], {})
-            group = row.get("group") or slot["round"]
+            group_val = row.get("group")
+            group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
             out.append({
                 "match_number": slot["match_number"], "group": group,
                 "stadium": row.get("stadium", ""), "date": slot["date"],
@@ -142,6 +143,35 @@ def _slots_for_date(results, date_str):
     return out
 
 
+def _find_bracket_match(team_a, team_b, results):
+    """Fallback for run_match: fixtures.csv still shows placeholder text
+    ("Group J winners v Group H runners-up") for knockout rows once the group
+    stage ends, so find_fixture() can't resolve an already-decided knockout
+    tie like "Portugal v Spain" by name. The bracket parser knows the real
+    teams for those slots (see _slots_for_date) — search it directly."""
+    a, b = team_a.strip().lower(), team_b.strip().lower()
+
+    def norm(name):
+        return {name.strip().lower(), map_fixture_name(name).strip().lower()}
+
+    bracket = parse_bracket(FIXTURES_PATH, results)
+    for slot in bracket:
+        home, away = slot["resolved_home"], slot["resolved_away"]
+        if not home or not away:
+            continue
+        forward = a in norm(home) and b in norm(away)
+        reverse = a in norm(away) and b in norm(home)
+        if not (forward or reverse):
+            continue
+        row = _fixture_meta_by_mno().get(slot["match_number"], {})
+        group_val = row.get("group")
+        group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
+        return {"match": slot["match_number"], "group": group,
+                "stadium": row.get("stadium", ""), "date": slot["date"],
+                "home_disp": home, "away_disp": away, "home": home, "away": away}
+    return None
+
+
 # ── match ────────────────────────────────────────────────────────────────────────
 def run_match(team_a, team_b):
     print("\nLoading data + building features ...")
@@ -150,7 +180,7 @@ def run_match(team_a, team_b):
     valid_teams = set(results["home_team"]) | set(results["away_team"])
     long = per_team_long(results)
 
-    m = find_fixture(team_a, team_b)
+    m = find_fixture(team_a, team_b) or _find_bracket_match(team_a, team_b, results)
     if m is None:
         print(f"\n  Couldn't find a World Cup match between '{team_a}' and '{team_b}'.")
         print("  Check spelling. Teams in the tournament:")
