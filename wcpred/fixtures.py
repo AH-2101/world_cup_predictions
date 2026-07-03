@@ -51,6 +51,89 @@ def list_team_names():
     return sorted(names)
 
 
+def fixture_meta_by_mno(fixtures_path=FIXTURES_PATH):
+    """{match_number(int): fixtures.csv row} for every knockout row (73-104)."""
+    fx = pd.read_csv(fixtures_path)
+    fx["mno"] = fx["match_number"].str.replace("Match ", "", regex=False).astype(int)
+    return {int(r["mno"]): r for _, r in fx.iterrows()}
+
+
+def resolve_slots_for_date(results, date_str, fixtures_path=FIXTURES_PATH):
+    """Resolvable (home, away, group, stadium, date, match_number) dicts for
+    every fixture on `date_str`. Knockout dates (>= FIRST_KNOCKOUT_DATE) are
+    resolved via the bracket parser, since fixtures.csv itself still shows
+    generic placeholder text ("Group J winners v Group H runners-up") for
+    those slots even once the live results feed knows the real teams. Group
+    stage dates are resolved directly from fixtures.csv (real team names
+    already appear there). Shared by wcpred.cli and wcpred.dashboard."""
+    date_ts = pd.Timestamp(date_str)
+    meta = fixture_meta_by_mno(fixtures_path)
+    out = []
+
+    if date_ts >= pd.Timestamp(FIRST_KNOCKOUT_DATE):
+        bracket = parse_bracket(fixtures_path, results)
+        for slot in bracket:
+            if pd.Timestamp(slot["date"]) != date_ts:
+                continue
+            if not slot["resolved_home"] or not slot["resolved_away"]:
+                continue
+            row = meta.get(slot["match_number"], {})
+            group_val = row.get("group")
+            group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
+            out.append({
+                "match_number": slot["match_number"], "group": group,
+                "stadium": row.get("stadium", ""), "date": slot["date"],
+                "home_disp": slot["resolved_home"], "away_disp": slot["resolved_away"],
+                "home": slot["resolved_home"], "away": slot["resolved_away"],
+            })
+    else:
+        valid_teams = set(results["home_team"]) | set(results["away_team"])
+        fx = pd.read_csv(fixtures_path)
+        day = fx[fx["date_dt"] == date_str]
+        for _, row in day.iterrows():
+            if " v " not in str(row["teams"]):
+                continue
+            left, right = [p.strip() for p in str(row["teams"]).split(" v ")]
+            home, away = map_fixture_name(left), map_fixture_name(right)
+            if home not in valid_teams or away not in valid_teams:
+                continue
+            out.append({
+                "match_number": row.get("match_number", ""), "group": row.get("group", ""),
+                "stadium": row.get("stadium", ""), "date": row.get("date_dt", ""),
+                "home_disp": left, "away_disp": right, "home": home, "away": away,
+            })
+    return out
+
+
+def find_bracket_match(team_a, team_b, results, fixtures_path=FIXTURES_PATH):
+    """Fallback for cli.run_match: fixtures.csv still shows placeholder text
+    for knockout rows once the group stage ends, so find_fixture() can't
+    resolve an already-decided knockout tie like "Portugal v Spain" by name.
+    The bracket parser knows the real teams for those slots — search it
+    directly. Shared by wcpred.cli and wcpred.dashboard."""
+    a, b = team_a.strip().lower(), team_b.strip().lower()
+
+    def norm(name):
+        return {name.strip().lower(), map_fixture_name(name).strip().lower()}
+
+    bracket = parse_bracket(fixtures_path, results)
+    for slot in bracket:
+        home, away = slot["resolved_home"], slot["resolved_away"]
+        if not home or not away:
+            continue
+        forward = a in norm(home) and b in norm(away)
+        reverse = a in norm(away) and b in norm(home)
+        if not (forward or reverse):
+            continue
+        row = fixture_meta_by_mno(fixtures_path).get(slot["match_number"], {})
+        group_val = row.get("group")
+        group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
+        return {"match": slot["match_number"], "group": group,
+                "stadium": row.get("stadium", ""), "date": slot["date"],
+                "home_disp": home, "away_disp": away, "home": home, "away": away}
+    return None
+
+
 # ── knockout bracket parser (Match 73-104) ─────────────────────────────────────
 # It's 2026-07-03: the group stage is finished and R32 is in progress. The live
 # martj42 results feed (see wcpred.data.load_results/fetch_results) already

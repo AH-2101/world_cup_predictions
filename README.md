@@ -85,6 +85,13 @@ All six live under `python -m wcpred.cli <command>`.
   ```
   python -m wcpred.cli edge
   ```
+- **`dashboard`** — runs the full pipeline once and writes a single self-contained `dashboard.html`: today's
+  matches (with scoreline heatmaps), the championship-odds bar chart, a road-to-the-final view, and the
+  model-vs-Polymarket edge table, all in one page. No server, no build step — open the file directly in a
+  browser. Re-run the command to refresh the snapshot.
+  ```
+  python -m wcpred.cli dashboard
+  ```
 
 ## How it works
 

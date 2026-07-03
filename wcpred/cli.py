@@ -7,6 +7,7 @@ Subcommands:
   bracket   print the resolved bracket state + per-round survival probabilities
   backtest  walk-forward accuracy/log-loss/Brier report (wcpred.backtest)
   edge      model vs. Polymarket odds disagreement table
+  dashboard write a self-contained dashboard.html (no server) with all of the above
 
 `python predict_today.py "A" "B"` (no subcommand) remains a shorthand for
 `match "A" "B"` — see `main()`.
@@ -27,13 +28,14 @@ from wcpred.model_wdl import MATCH_WEIGHT, MATCH_NEUTRAL
 from wcpred.fixtures import (
     FIXTURES_PATH, FIRST_KNOCKOUT_DATE,
     find_fixture, list_team_names, map_fixture_name, parse_bracket,
+    fixture_meta_by_mno, resolve_slots_for_date, find_bracket_match,
 )
 from wcpred.viz import make_chart, tag_match, scoreline_heatmap, championship_bar, road_to_final
 from wcpred import ensemble
 from wcpred import simulate
 from wcpred import market
 
-COMMANDS = {"match", "today", "sim", "bracket", "backtest", "edge"}
+COMMANDS = {"match", "today", "sim", "bracket", "backtest", "edge", "dashboard"}
 
 # Monte Carlo trial count for `sim`/`bracket`/`edge`. The plan's default of
 # 20000 is accurate but a few seconds slower than feels snappy for a CLI that
@@ -91,85 +93,15 @@ def _report_match(m, predictor, final_elo):
 
 
 def _fixture_meta_by_mno(fixtures_path=FIXTURES_PATH):
-    fx = pd.read_csv(fixtures_path)
-    fx["mno"] = fx["match_number"].str.replace("Match ", "", regex=False).astype(int)
-    return {int(r["mno"]): r for _, r in fx.iterrows()}
+    return fixture_meta_by_mno(fixtures_path)
 
 
 def _slots_for_date(results, date_str):
-    """Resolvable (home, away, group, stadium, date, match_number) tuples for
-    every fixture on `date_str`. Knockout dates (>= FIRST_KNOCKOUT_DATE) are
-    resolved via the bracket parser, since fixtures.csv itself still shows
-    generic placeholder text ("Group J winners v Group H runners-up") for
-    those slots even once the live results feed knows the real teams. Group
-    stage dates are resolved directly from fixtures.csv (real team names
-    already appear there)."""
-    date_ts = pd.Timestamp(date_str)
-    meta = _fixture_meta_by_mno()
-    out = []
-
-    if date_ts >= pd.Timestamp(FIRST_KNOCKOUT_DATE):
-        bracket = parse_bracket(FIXTURES_PATH, results)
-        for slot in bracket:
-            if pd.Timestamp(slot["date"]) != date_ts:
-                continue
-            if not slot["resolved_home"] or not slot["resolved_away"]:
-                continue
-            row = meta.get(slot["match_number"], {})
-            group_val = row.get("group")
-            group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
-            out.append({
-                "match_number": slot["match_number"], "group": group,
-                "stadium": row.get("stadium", ""), "date": slot["date"],
-                "home_disp": slot["resolved_home"], "away_disp": slot["resolved_away"],
-                "home": slot["resolved_home"], "away": slot["resolved_away"],
-            })
-    else:
-        valid_teams = set(results["home_team"]) | set(results["away_team"])
-        fx = pd.read_csv(FIXTURES_PATH)
-        day = fx[fx["date_dt"] == date_str]
-        for _, row in day.iterrows():
-            if " v " not in str(row["teams"]):
-                continue
-            left, right = [p.strip() for p in str(row["teams"]).split(" v ")]
-            home, away = map_fixture_name(left), map_fixture_name(right)
-            if home not in valid_teams or away not in valid_teams:
-                continue
-            out.append({
-                "match_number": row.get("match_number", ""), "group": row.get("group", ""),
-                "stadium": row.get("stadium", ""), "date": row.get("date_dt", ""),
-                "home_disp": left, "away_disp": right, "home": home, "away": away,
-            })
-    return out
+    return resolve_slots_for_date(results, date_str)
 
 
 def _find_bracket_match(team_a, team_b, results):
-    """Fallback for run_match: fixtures.csv still shows placeholder text
-    ("Group J winners v Group H runners-up") for knockout rows once the group
-    stage ends, so find_fixture() can't resolve an already-decided knockout
-    tie like "Portugal v Spain" by name. The bracket parser knows the real
-    teams for those slots (see _slots_for_date) — search it directly."""
-    a, b = team_a.strip().lower(), team_b.strip().lower()
-
-    def norm(name):
-        return {name.strip().lower(), map_fixture_name(name).strip().lower()}
-
-    bracket = parse_bracket(FIXTURES_PATH, results)
-    for slot in bracket:
-        home, away = slot["resolved_home"], slot["resolved_away"]
-        if not home or not away:
-            continue
-        forward = a in norm(home) and b in norm(away)
-        reverse = a in norm(away) and b in norm(home)
-        if not (forward or reverse):
-            continue
-        row = _fixture_meta_by_mno().get(slot["match_number"], {})
-        group_val = row.get("group")
-        group = group_val if isinstance(group_val, str) and group_val.strip() else slot["round"]
-        return {"match": slot["match_number"], "group": group,
-                "stadium": row.get("stadium", ""), "date": slot["date"],
-                "home_disp": home, "away_disp": away, "home": home, "away": away}
-    return None
+    return find_bracket_match(team_a, team_b, results)
 
 
 # ── match ────────────────────────────────────────────────────────────────────────
@@ -371,6 +303,29 @@ def _cmd_edge(args):
     run_edge(n=args.n)
 
 
+# ── dashboard ────────────────────────────────────────────────────────────────────
+def run_dashboard(n=SIM_DEFAULT_N):
+    from wcpred import dashboard
+
+    print("Building dashboard data (today's matches, sim, bracket, live Polymarket odds) ...")
+    data = dashboard.build_data(sim_n=n)
+    date_str = data["generated_at"]
+    out_path = os.path.join(_out_dir(date_str), "dashboard.html")
+    path = dashboard.render(data, out_path)
+
+    print(f"\nDashboard written -> {path}")
+    print(f"  {len(data['today_matches'])} today's match(es), "
+          f"{len(data['championship'])} teams in championship odds, "
+          f"{len(data['edge'])} teams priced by both model and market")
+    if data.get("market_error"):
+        print(f"  (Polymarket odds unavailable this run: {data['market_error']})")
+    print(f"\nOpen it directly in a browser -- no server needed:\n  file://{os.path.abspath(path)}\n")
+
+
+def _cmd_dashboard(args):
+    run_dashboard(n=args.n)
+
+
 # ── argparse plumbing ──────────────────────────────────────────────────────────────
 def build_parser():
     parser = argparse.ArgumentParser(prog="wcpred", description="World Cup 2026 match predictor")
@@ -399,6 +354,10 @@ def build_parser():
     p_edge = sub.add_parser("edge", help="Model vs. Polymarket odds disagreement table")
     p_edge.add_argument("--n", type=int, default=SIM_DEFAULT_N, help=f"number of simulations (default {SIM_DEFAULT_N})")
     p_edge.set_defaults(func=_cmd_edge)
+
+    p_dash = sub.add_parser("dashboard", help="Write a self-contained dashboard.html (no server)")
+    p_dash.add_argument("--n", type=int, default=SIM_DEFAULT_N, help=f"number of simulations (default {SIM_DEFAULT_N})")
+    p_dash.set_defaults(func=_cmd_dashboard)
 
     return parser
 
