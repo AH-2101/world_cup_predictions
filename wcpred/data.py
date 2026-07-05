@@ -1,12 +1,14 @@
 """wcpred.data — fetch/load/normalize historical results + per-team reshaping."""
 
 import os
+import time
 import numpy as np
 import pandas as pd
 import requests
 
 CACHE_DIR = "data_cache"
 RESULTS_URL = "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
+RESULTS_STALE_SECONDS = 6 * 3600  # refetch cache older than 6 hours, mirrors wcpred.market's TTL
 
 # normalizes the historical results.csv team names
 NAME_MAP = {
@@ -27,14 +29,25 @@ FIXTURE_NAME_MAP = {
 
 
 # ── data loading ────────────────────────────────────────────────────────────────
-def fetch_results():
+def fetch_results(force=False):
+    """Download results.csv if missing or stale (mtime older than
+    RESULTS_STALE_SECONDS), else reuse the cache. A download failure falls
+    back to a stale cache with a printed warning rather than a hard error,
+    same "stale cache beats hard failure" convention as wcpred.market."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = os.path.join(CACHE_DIR, "results.csv")
-    if not os.path.exists(path):
-        resp = requests.get(RESULTS_URL, timeout=120)
-        resp.raise_for_status()
-        with open(path, "wb") as fh:
-            fh.write(resp.content)
+    exists = os.path.exists(path)
+    stale = not exists or force or (time.time() - os.path.getmtime(path)) > RESULTS_STALE_SECONDS
+    if stale:
+        try:
+            resp = requests.get(RESULTS_URL, timeout=120)
+            resp.raise_for_status()
+            with open(path, "wb") as fh:
+                fh.write(resp.content)
+        except requests.RequestException as exc:
+            if not exists:
+                raise
+            print(f"[data] results.csv refresh failed ({exc}); using stale cache.")
     return pd.read_csv(path)
 
 
@@ -42,8 +55,8 @@ def normalize_country(name):
     return NAME_MAP.get(name, name) if isinstance(name, str) else name
 
 
-def load_results():
-    r = fetch_results()
+def load_results(force=False):
+    r = fetch_results(force=force)
     r["home_team"] = r["home_team"].map(normalize_country)
     r["away_team"] = r["away_team"].map(normalize_country)
     r["date"] = pd.to_datetime(r["date"])

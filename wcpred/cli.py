@@ -8,6 +8,8 @@ Subcommands:
   backtest  walk-forward accuracy/log-loss/Brier report (wcpred.backtest)
   edge      model vs. Polymarket odds disagreement table
   dashboard write a self-contained dashboard.html (no server) with all of the above
+  score     score the prediction ledger (wcpred.ledger) against real results -- report card
+  serve     launch the interactive Flask front end (wcpred.server) on localhost
 
 `python predict_today.py "A" "B"` (no subcommand) remains a shorthand for
 `match "A" "B"` — see `main()`.
@@ -34,8 +36,9 @@ from wcpred.viz import make_chart, tag_match, scoreline_heatmap, championship_ba
 from wcpred import ensemble
 from wcpred import simulate
 from wcpred import market
+from wcpred import ledger
 
-COMMANDS = {"match", "today", "sim", "bracket", "backtest", "edge", "dashboard"}
+COMMANDS = {"match", "today", "sim", "bracket", "backtest", "edge", "dashboard", "score", "serve"}
 
 # Monte Carlo trial count for `sim`/`bracket`/`edge`. The plan's default of
 # 20000 is accurate but a few seconds slower than feels snappy for a CLI that
@@ -63,7 +66,7 @@ def _out_dir(date):
     return out_dir
 
 
-def _report_match(m, predictor, final_elo):
+def _report_match(m, predictor, final_elo, results=None, source="cli"):
     """Print the enriched single-match report and save both charts
     (the original bar chart + the new Dixon-Coles scoreline heatmap)."""
     out = predictor.predict(m["home"], m["away"], MATCH_NEUTRAL, MATCH_WEIGHT)
@@ -73,6 +76,16 @@ def _report_match(m, predictor, final_elo):
     pick, conf = max(outcomes, key=lambda x: x[1])
     he, ae = final_elo.get(m["home"], ELO_BASE), final_elo.get(m["away"], ELO_BASE)
     tag = tag_match(conf, p_home, p_away, he, ae)
+
+    if results is not None:
+        try:
+            mkt = market.match(m["home"], m["away"])
+        except market.MarketError:
+            mkt = None
+        try:
+            ledger.log_prediction(m, out, predictor, results, source, market_probs=mkt)
+        except Exception as exc:  # ledger logging must never break a prediction
+            print(f"  [ledger] couldn't log this prediction ({exc!r})")
 
     out_dir = _out_dir(m["date"])
     bar_chart = make_chart(m, p_home, p_draw, p_away, m["date"], out_dir)
@@ -126,7 +139,7 @@ def run_match(team_a, team_b):
     print(f"Building ensemble predictor (XGBoost + Dixon-Coles, data up to {match_date}) ...")
     predictor = ensemble.build(dataset, long, final_elo, match_date)
 
-    _report_match(m, predictor, final_elo)
+    _report_match(m, predictor, final_elo, results=results, source="cli-match")
 
 
 def _cmd_match(args):
@@ -155,7 +168,7 @@ def run_today(date=None):
 
     print(f"\n{len(slots)} match(es) on {date}:")
     for m in slots:
-        _report_match(m, predictor, final_elo)
+        _report_match(m, predictor, final_elo, results=results, source="cli-today")
 
 
 def _cmd_today(args):
@@ -231,6 +244,56 @@ def run_bracket(n=SIM_DEFAULT_N):
 
 def _cmd_bracket(args):
     run_bracket(n=args.n)
+
+
+# ── score ────────────────────────────────────────────────────────────────────────
+def run_score():
+    print("Loading live results feed ...")
+    results = load_results()
+    card = ledger.report_card(results)
+
+    print(f"\n=== Prediction ledger report card ===\n")
+    print(f"Logged predictions   : {card['n_logged']}")
+    print(f"Scored (honest)       : {card['n_scored']}")
+    if not card["n_scored"]:
+        print("\nNo honestly-scored predictions yet -- run `match`/`today`/`serve` to log some, "
+              "then rerun `score` once real results land.\n")
+        return
+
+    print(f"Accuracy               : {card['accuracy']:.3f}")
+    print(f"Log-loss (vs baseline)  : {card['log_loss']:.3f} vs {card['baseline_log_loss']:.3f}")
+    print(f"Brier (vs baseline)     : {card['brier']:.3f} vs {card['baseline_brier']:.3f}")
+    if card["market_n"]:
+        print(f"Log-loss vs market ({card['market_n']} priced): "
+              f"{card['log_loss']:.3f} vs {card['market_log_loss']:.3f}")
+
+    print("\nPer-match:")
+    for r in card["per_match"]:
+        mark = "Y" if r["correct"] else "n"
+        print(f"  [{mark}] {r['date']}  {r['home']:<20} v {r['away']:<20}  "
+              f"pick={r['pick']:<5} ({r['pick_prob']*100:5.1f}%)  log_loss={r['log_loss']:.3f}")
+    print()
+
+
+def _cmd_score(args):
+    run_score()
+
+
+# ── serve ────────────────────────────────────────────────────────────────────────
+def run_serve(port=8000, n=SIM_DEFAULT_N):
+    try:
+        from wcpred import server
+    except ImportError as exc:
+        print(f"\n[serve] Flask isn't installed ({exc}). `pip install -r requirements.txt` and retry.\n")
+        return
+    state = server.build_state(sim_n=n)
+    app = server.create_app(state)
+    print(f"\nServing the interactive dashboard on http://127.0.0.1:{port} (Ctrl+C to stop)\n")
+    app.run(host="127.0.0.1", port=port)
+
+
+def _cmd_serve(args):
+    run_serve(port=args.port, n=args.n)
 
 
 # ── backtest ─────────────────────────────────────────────────────────────────────
@@ -358,6 +421,14 @@ def build_parser():
     p_dash = sub.add_parser("dashboard", help="Write a self-contained dashboard.html (no server)")
     p_dash.add_argument("--n", type=int, default=SIM_DEFAULT_N, help=f"number of simulations (default {SIM_DEFAULT_N})")
     p_dash.set_defaults(func=_cmd_dashboard)
+
+    p_score = sub.add_parser("score", help="Score the prediction ledger against real results (report card)")
+    p_score.set_defaults(func=_cmd_score)
+
+    p_serve = sub.add_parser("serve", help="Launch the interactive Flask front end")
+    p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument("--n", type=int, default=SIM_DEFAULT_N, help=f"number of simulations (default {SIM_DEFAULT_N})")
+    p_serve.set_defaults(func=_cmd_serve)
 
     return parser
 

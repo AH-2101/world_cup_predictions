@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World Cup 2026 -- Live Predictor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<h1>World Cup 2026 -- Live Predictor</h1>
+<p class="subtitle">XGBoost + Dixon-Coles ensemble &middot; Monte Carlo bracket simulation &middot; live Polymarket odds &middot; scores its own predictions as results land</p>
+
+<div class="card">
+  <h2>Predict a match</h2>
+  <div class="predict-row">
+    <select id="pick-home"><option value="">Home / Team A</option></select>
+    <span class="predict-vs">vs</span>
+    <select id="pick-away"><option value="">Away / Team B</option></select>
+    <button id="predict-btn">Predict</button>
+  </div>
+  <div id="predict-result"></div>
+</div>
+
+<div class="card">
+  <h2>Today's matches</h2>
+  <div class="grid" id="today-grid"></div>
+</div>
+
+<div class="card">
+  <h2>Model report card</h2>
+  <p class="note">Only predictions logged <em>before</em> the result was known count here -- no hindsight.</p>
+  <div class="tiles" id="report-tiles"></div>
+  <div id="report-trend"></div>
+  <details class="tableview"><summary>Per-match history</summary><div id="report-table"></div></details>
+  <div class="refresh-row">
+    <button id="refresh-btn">Refresh &amp; rescore</button>
+    <span class="note" id="refresh-status"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Championship odds</h2>
+  <div id="champ-chart"></div>
+  <details class="tableview"><summary>View as table</summary><div id="champ-table"></div></details>
+</div>
+
+<div class="card">
+  <h2>Road to the final</h2>
+  <p class="note">Top 8 teams by championship odds &middot; survival probability by round</p>
+  <div id="road-view"></div>
+</div>
+
+<div class="card">
+  <h2>Model vs. Polymarket -- tournament winner</h2>
+  <p class="note" id="edge-note"></p>
+  <div id="edge-chart"></div>
+  <details class="tableview"><summary>View as table</summary><div id="edge-table"></div></details>
+</div>
+
+<div class="card">
+  <h2>Knockout bracket</h2>
+  <div id="bracket-table"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

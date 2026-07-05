@@ -309,13 +309,24 @@ def parse_bracket(fixtures_path, results):
     wc = _raw_wc2026()
     knockout_wc = wc[wc["date"] >= FIRST_KNOCKOUT_DATE].sort_values("date", kind="stable").reset_index(drop=True)
 
-    ko_fx = fx[(fx["mno"] >= 73) & (fx["mno"] <= 94)].reset_index(drop=True)
-    if len(ko_fx) != len(knockout_wc):
+    # The live feed resolves knockout matchups (real team names, score NaN
+    # until played) as soon as the preceding round finishes -- NOT just R32.
+    # As the real tournament progresses this reveals more rows than any fixed
+    # "Match 73-94" snapshot anticipates (e.g. once all of R32 is done, every
+    # R16 matchup -- and the first QF pairing -- is already knowable). So we
+    # take however many knockout slots (in Match-number order, starting at 73)
+    # the feed has resolved, and let everything after that fall through to
+    # the symbolic "Winner match N" / "Runner-up match N" resolution below.
+    fx_ko_all = fx[fx["mno"] >= 73].sort_values("mno").reset_index(drop=True)
+    n_resolved = len(knockout_wc)
+    if n_resolved > len(fx_ko_all):
         raise ValueError(
-            f"bracket parser: fixtures.csv has {len(ko_fx)} knockout rows for Match 73-94 "
-            f"but the live results feed has {len(knockout_wc)} rows from {FIRST_KNOCKOUT_DATE} on "
-            "-- feed and fixtures.csv are out of sync"
+            f"bracket parser: live results feed has {n_resolved} resolved knockout rows from "
+            f"{FIRST_KNOCKOUT_DATE} on, more than the {len(fx_ko_all)} knockout slots in "
+            "fixtures.csv -- fixtures.csv itself is out of date for this tournament"
         )
+    ko_fx = fx_ko_all.iloc[:n_resolved].reset_index(drop=True)
+    symbolic_fx = fx_ko_all.iloc[n_resolved:]
 
     slots = {}
     for i, row in ko_fx.iterrows():
@@ -362,9 +373,10 @@ def parse_bracket(fixtures_path, results):
             else:
                 slot["winner"] = min(h, a)
 
-    # Match 95-104: pure "Winner match N" / "Runner-up match N" references,
-    # resolved to concrete teams wherever the referenced match is already decided.
-    for _, row in fx[fx["mno"] >= 95].iterrows():
+    # Everything beyond the feed's resolved knockout rows: pure "Winner match
+    # N" / "Runner-up match N" references, resolved to concrete teams
+    # wherever the referenced match is already decided.
+    for _, row in symbolic_fx.iterrows():
         mno = int(row["mno"])
         left, right = [p.strip() for p in str(row["teams"]).split(" v ")]
         h_src, a_src = _parse_ref(left), _parse_ref(right)

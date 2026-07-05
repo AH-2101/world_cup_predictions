@@ -92,7 +92,37 @@ class Predictor:
                 "p_away": float(p_away), "score_matrix": M}
 
 
-def build(dataset, long, final_elo, asof):
+def _fit_calibrators(blended_val, y_val_arr, sample_weight=None):
+    calibrators = []
+    for c in range(3):
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(blended_val[:, c], (y_val_arr == c).astype(float), sample_weight=sample_weight)
+        calibrators.append(iso)
+    return calibrators
+
+
+def _apply_calibrators(calibrators, blended_val):
+    calibrated = np.array([
+        [calibrators[c].predict([blended_val[i, c]])[0] for c in range(3)]
+        for i in range(len(blended_val))
+    ])
+    return _normalize_rows(calibrated)
+
+
+def build(dataset, long, final_elo, asof, recency_halflife_days=365):
+    """Build the ensemble Predictor.
+
+    `recency_halflife_days` lets recently-played matches (this tournament's
+    own results, as they land) count more toward the blend weight `alpha` and
+    the isotonic calibration than older validation-split history — the
+    "learn from what just happened" step of the closed prediction loop. Two
+    guardrails keep this from letting a handful of new matches swing the
+    model: a weight floor (0.10, so 2023-2025 history never vanishes) and
+    shrinkage of the final alpha toward the unweighted optimum, proportional
+    to how few recent matches there are (`n_recent / (n_recent + 20)`). Pass
+    `recency_halflife_days=None` to reproduce the original unweighted
+    behavior exactly (used for A/B comparison and as a regression check).
+    """
     asof = pd.Timestamp(asof)
     train, val = split_by_date(dataset, TRAIN_START, VAL_START, asof)
     model, X_val, y_val = train_model(train, val)
@@ -102,32 +132,47 @@ def build(dataset, long, final_elo, asof):
     p_dc_val = _dc_val_probs(params, val)
     y_val_arr = y_val.values if hasattr(y_val, "values") else np.asarray(y_val)
 
-    def neg_ll(alpha):
+    def neg_ll(alpha, weight=None):
         blended = _normalize_rows(alpha * p_xgb_val + (1 - alpha) * p_dc_val)
-        return log_loss(y_val_arr, blended, labels=[0, 1, 2])
+        return log_loss(y_val_arr, blended, labels=[0, 1, 2], sample_weight=weight)
 
-    res = minimize_scalar(neg_ll, bounds=(0.0, 1.0), method="bounded")
-    alpha = float(res.x)
+    alpha_base = float(minimize_scalar(neg_ll, bounds=(0.0, 1.0), method="bounded").x)
+
+    if recency_halflife_days is None:
+        w, n_recent, shrink, alpha_recency, alpha = None, 0, 0.0, alpha_base, alpha_base
+    else:
+        age_days = (asof - val["date"]).dt.days.to_numpy()
+        w = np.clip(0.5 ** (age_days / recency_halflife_days), 0.10, None)
+        n_recent = int(np.sum(age_days <= recency_halflife_days))
+        alpha_recency = float(minimize_scalar(
+            lambda a: neg_ll(a, weight=w), bounds=(0.0, 1.0), method="bounded"
+        ).x)
+        shrink = n_recent / (n_recent + 20.0)
+        alpha = alpha_base + shrink * (alpha_recency - alpha_base)
 
     blended_val = _normalize_rows(alpha * p_xgb_val + (1 - alpha) * p_dc_val)
+    calibrators = _fit_calibrators(blended_val, y_val_arr, sample_weight=w)
 
-    calibrators = []
-    for c in range(3):
-        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        iso.fit(blended_val[:, c], (y_val_arr == c).astype(float))
-        calibrators.append(iso)
+    # unweighted alpha_base + base calibration, kept only as an A/B diagnostic
+    # against the recency-weighted predictor actually used for predictions.
+    blended_val_base = _normalize_rows(alpha_base * p_xgb_val + (1 - alpha_base) * p_dc_val)
+    calibrators_base = _fit_calibrators(blended_val_base, y_val_arr)
 
     predictor = Predictor(model, long, final_elo, params, alpha, calibrators, asof)
     predictor.val_log_loss_blended = float(neg_ll(alpha))
 
-    calibrated_val = np.array([
-        [calibrators[c].predict([blended_val[i, c]])[0] for c in range(3)]
-        for i in range(len(blended_val))
-    ])
-    calibrated_val = _normalize_rows(calibrated_val)
+    calibrated_val = _apply_calibrators(calibrators, blended_val)
     predictor.val_log_loss_calibrated = float(log_loss(y_val_arr, calibrated_val, labels=[0, 1, 2]))
     predictor.val_log_loss_xgb_only = float(log_loss(y_val_arr, p_xgb_val, labels=[0, 1, 2]))
+
+    calibrated_val_base = _apply_calibrators(calibrators_base, blended_val_base)
+    predictor.val_log_loss_calibrated_base = float(log_loss(y_val_arr, calibrated_val_base, labels=[0, 1, 2]))
+
     predictor.alpha = alpha
+    predictor.alpha_base = alpha_base
+    predictor.alpha_recency = alpha_recency
+    predictor.shrink = shrink
+    predictor.n_recent_val = n_recent
 
     return predictor
 
@@ -148,9 +193,13 @@ if __name__ == "__main__":
     predictor = build(dataset, long, final_elo, asof)
 
     print(f"\nBlend weight alpha (XGBoost share) : {predictor.alpha:.3f}")
+    print(f"  alpha_base (unweighted)          : {predictor.alpha_base:.3f}")
+    print(f"  alpha_recency (fully weighted)   : {predictor.alpha_recency:.3f}")
+    print(f"  shrink toward alpha_base         : {predictor.shrink:.3f}  (n_recent_val={predictor.n_recent_val})")
     print(f"Validation log-loss, XGBoost only   : {predictor.val_log_loss_xgb_only:.3f}")
     print(f"Validation log-loss, blended (raw)  : {predictor.val_log_loss_blended:.3f}")
     print(f"Validation log-loss, blended+calib  : {predictor.val_log_loss_calibrated:.3f}")
+    print(f"  ...vs unweighted (old) calib      : {predictor.val_log_loss_calibrated_base:.3f}")
 
     home, away = "Spain", "Saudi Arabia"
     out = predictor.predict(home, away, neutral=True, weight=4)
