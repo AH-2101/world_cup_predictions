@@ -37,6 +37,7 @@ from wcpred import ensemble
 from wcpred import simulate
 from wcpred import market
 from wcpred import ledger
+from wcpred import feedback
 
 COMMANDS = {"match", "today", "sim", "bracket", "backtest", "edge", "dashboard", "score", "serve"}
 
@@ -138,6 +139,8 @@ def run_match(team_a, team_b):
     match_date = m["date"]
     print(f"Building ensemble predictor (XGBoost + Dixon-Coles, data up to {match_date}) ...")
     predictor = ensemble.build(dataset, long, final_elo, match_date)
+    adj = feedback.apply(predictor, results)
+    print("  " + feedback.summary_line(adj))
 
     _report_match(m, predictor, final_elo, results=results, source="cli-match")
 
@@ -165,6 +168,8 @@ def run_today(date=None):
 
     print(f"Building ensemble predictor (data up to {date}) ...")
     predictor = ensemble.build(dataset, long, final_elo, date)
+    adj = feedback.apply(predictor, results)
+    print("  " + feedback.summary_line(adj))
 
     print(f"\n{len(slots)} match(es) on {date}:")
     for m in slots:
@@ -180,7 +185,9 @@ def _build_predictor_today(results):
     dataset, final_elo = build_dataset(results)
     long = per_team_long(results)
     asof = pd.Timestamp.today().normalize()
-    return ensemble.build(dataset, long, final_elo, asof), asof
+    predictor = ensemble.build(dataset, long, final_elo, asof)
+    feedback.apply(predictor, results)  # learn from the ledger's track record
+    return predictor, asof
 
 
 def run_sim(n=SIM_DEFAULT_N):
@@ -280,20 +287,23 @@ def _cmd_score(args):
 
 
 # ── serve ────────────────────────────────────────────────────────────────────────
-def run_serve(port=8000, n=SIM_DEFAULT_N):
+def run_serve(port=8000, n=SIM_DEFAULT_N, refresh_interval=30):
     try:
         from wcpred import server
     except ImportError as exc:
         print(f"\n[serve] Flask isn't installed ({exc}). `pip install -r requirements.txt` and retry.\n")
         return
     state = server.build_state(sim_n=n)
+    server.start_auto_refresh(state, interval_min=refresh_interval)
     app = server.create_app(state)
-    print(f"\nServing the interactive dashboard on http://127.0.0.1:{port} (Ctrl+C to stop)\n")
+    if refresh_interval and refresh_interval > 0:
+        print(f"\nAuto-refreshing results + rescoring every {refresh_interval} min.")
+    print(f"Serving the interactive dashboard on http://127.0.0.1:{port} (Ctrl+C to stop)\n")
     app.run(host="127.0.0.1", port=port)
 
 
 def _cmd_serve(args):
-    run_serve(port=args.port, n=args.n)
+    run_serve(port=args.port, n=args.n, refresh_interval=args.refresh_interval)
 
 
 # ── backtest ─────────────────────────────────────────────────────────────────────
@@ -428,6 +438,8 @@ def build_parser():
     p_serve = sub.add_parser("serve", help="Launch the interactive Flask front end")
     p_serve.add_argument("--port", type=int, default=8000)
     p_serve.add_argument("--n", type=int, default=SIM_DEFAULT_N, help=f"number of simulations (default {SIM_DEFAULT_N})")
+    p_serve.add_argument("--refresh-interval", type=int, default=30,
+                         help="minutes between automatic results-refresh + rescore (0 to disable; default 30)")
     p_serve.set_defaults(func=_cmd_serve)
 
     return parser

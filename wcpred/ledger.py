@@ -27,7 +27,11 @@ LEDGER_PATH = os.path.join(LEDGER_DIR, "predictions.csv")
 COLUMNS = [
     "logged_at", "match_number", "match_date", "home", "away", "round",
     "asof", "alpha", "p_home", "p_draw", "p_away", "pick",
-    "mkt_home", "mkt_draw", "mkt_away", "result_known_at_log", "source",
+    "mkt_home", "mkt_draw", "mkt_away",
+    # per-model component probabilities (used by wcpred.feedback to learn which
+    # of XGBoost / Dixon-Coles has been more right); blank for pre-migration rows
+    "p_xgb_home", "p_xgb_draw", "p_xgb_away", "p_dc_home", "p_dc_draw", "p_dc_away",
+    "result_known_at_log", "source",
 ]
 
 _MATCH_WINDOW_DAYS = 1  # fixtures.csv / results.csv dates can differ by a day
@@ -38,6 +42,10 @@ def load_ledger():
     if not os.path.exists(LEDGER_PATH):
         return pd.DataFrame(columns=COLUMNS)
     df = pd.read_csv(LEDGER_PATH)
+    # reindex so callers always see every current column, even when reading an
+    # older ledger written before newer columns (e.g. the p_xgb_*/p_dc_*
+    # components) were added — missing ones come back as NaN.
+    df = df.reindex(columns=COLUMNS)
     df["match_date"] = pd.to_datetime(df["match_date"])
     df["logged_at"] = pd.to_datetime(df["logged_at"])
     return df
@@ -57,12 +65,18 @@ def log_prediction(m, pred, predictor, results, source, market_probs=None):
     """Append one ledger row for a single prediction. `m` is a fixture dict
     (as returned by find_fixture / resolve_slots_for_date / find_bracket_match
     — home/away plus either "match_number" or "match", and "group" or
-    "round"). `pred` is predictor.predict(...)'s output dict."""
+    "round"). `pred` is predictor.predict(...)'s output dict.
+
+    Writes by rewriting the whole file (it's tiny — dozens of rows), which
+    keeps append-time schema fragility out of the picture and transparently
+    migrates an older ledger to any newly-added COLUMNS (old rows get blanks)."""
     os.makedirs(LEDGER_DIR, exist_ok=True)
     match_date = pd.Timestamp(m["date"])
     p = [pred["p_home"], pred["p_draw"], pred["p_away"]]
     pick = ["home", "draw", "away"][int(np.argmax(p))]
     market_probs = market_probs or {}
+    p_xgb = pred.get("p_xgb") or ["", "", ""]
+    p_dc = pred.get("p_dc") or ["", "", ""]
     row = {
         "logged_at": pd.Timestamp.now(),
         "match_number": m.get("match_number", m.get("match", "")),
@@ -74,11 +88,14 @@ def log_prediction(m, pred, predictor, results, source, market_probs=None):
         "pick": pick,
         "mkt_home": market_probs.get("p_home", ""), "mkt_draw": market_probs.get("p_draw", ""),
         "mkt_away": market_probs.get("p_away", ""),
+        "p_xgb_home": p_xgb[0], "p_xgb_draw": p_xgb[1], "p_xgb_away": p_xgb[2],
+        "p_dc_home": p_dc[0], "p_dc_draw": p_dc[1], "p_dc_away": p_dc[2],
         "result_known_at_log": _result_known(results, m["home"], m["away"], match_date),
         "source": source,
     }
-    write_header = not os.path.exists(LEDGER_PATH)
-    pd.DataFrame([row], columns=COLUMNS).to_csv(LEDGER_PATH, mode="a", header=write_header, index=False)
+    existing = load_ledger()
+    combined = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+    combined.reindex(columns=COLUMNS).to_csv(LEDGER_PATH, index=False)
     return row
 
 

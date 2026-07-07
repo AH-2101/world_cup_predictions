@@ -294,8 +294,33 @@ function renderTrend(perMatch) {
   container.appendChild(el("div", "note", "Cumulative accuracy over scored predictions, in match order"));
 }
 
+function renderBanner(card) {
+  const banner = document.getElementById("status-banner");
+  clear(banner);
+  const today = new Date().toISOString().slice(0, 10);
+  banner.appendChild(document.createTextNode("Results as of "));
+  const rd = el("b", null, card.results_max_date);
+  banner.appendChild(rd);
+  if (card.results_max_date < today) {
+    banner.appendChild(el("span", "lag", `  (waiting on the data feed for ${today} matches)`));
+  }
+  const built = card.built_at ? new Date(card.built_at).toLocaleTimeString() : "--";
+  banner.appendChild(document.createTextNode(`  ·  model rebuilt ${built}`));
+  const fb = card.feedback;
+  if (fb && fb.n_used > 0) {
+    let msg = `  ·  learning from ${fb.n_used} scored match(es): T=${fb.temperature.toFixed(3)}`;
+    if (fb.alpha_effective !== null && fb.alpha_effective !== undefined) {
+      msg += `, blend ${fb.alpha_base.toFixed(3)}→${fb.alpha_effective.toFixed(3)}`;
+    }
+    banner.appendChild(document.createTextNode(msg));
+  } else {
+    banner.appendChild(document.createTextNode("  ·  no scored predictions yet (model unadjusted)"));
+  }
+}
+
 async function loadReportCard() {
   const card = await getJSON("/api/report-card");
+  renderBanner(card);
   const tiles = document.getElementById("report-tiles");
   clear(tiles);
 
@@ -368,3 +393,13 @@ loadReportCard();
 loadSim();
 loadEdge();
 loadBracket();
+
+// Auto-poll so the page reflects the server's background auto-refresh without a
+// manual click. Cheap read-only GETs; the heavy rebuild happens server-side.
+setInterval(() => {
+  loadReportCard().catch(() => {});
+  loadToday().catch(() => {});
+  loadSim().catch(() => {});
+  loadEdge().catch(() => {});
+  loadBracket().catch(() => {});
+}, 120000);

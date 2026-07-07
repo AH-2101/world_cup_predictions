@@ -114,3 +114,9 @@ button:disabled { opacity: 0.5; cursor: default; }
 .refresh-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
 #report-trend svg { display: block; max-width: 100%; }
 .market-line { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+.status-banner {
+  font-size: 13px; color: var(--text-secondary); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px;
+}
+.status-banner b { color: var(--text-primary); }
+.status-banner .lag { color: var(--orange); }

@@ -69,6 +69,11 @@ class Predictor:
         self.alpha = alpha
         self.calibrators = calibrators  # list of 3 fitted IsotonicRegression
         self.asof = asof
+        # ── ledger-feedback layer (set by wcpred.feedback.apply for LIVE
+        # predictions only; defaults here reproduce the un-adjusted model) ──
+        self.tournament_temperature = 1.0   # >1 softens confidence, <1 sharpens
+        self.alpha_effective = None         # tournament-adjusted blend; None => self.alpha
+        self.feedback_info = None           # dict of diagnostics for display
 
     def _calibrate(self, blended):
         calibrated = np.array([
@@ -77,6 +82,15 @@ class Predictor:
         calibrated = np.clip(calibrated, EPS, None)
         return calibrated / calibrated.sum()
 
+    def _temper(self, p):
+        """Apply the tournament-fit temperature to a categorical: p_i^(1/T),
+        renormalized. T=1.0 is a no-op."""
+        T = self.tournament_temperature
+        if T is None or T == 1.0:
+            return p
+        adj = np.clip(p, EPS, None) ** (1.0 / T)
+        return adj / adj.sum()
+
     def predict(self, home, away, neutral, weight):
         p_xgb = np.array(predict_symmetric(
             self.model, self.long, self.final_elo, home, away, self.asof, neutral, weight
@@ -84,12 +98,14 @@ class Predictor:
         M = model_goals.score_matrix(self.params, home, away)
         p_dc = np.array(model_goals.wdl_from_matrix(M))
 
-        blended = self.alpha * p_xgb + (1 - self.alpha) * p_dc
+        alpha = self.alpha if self.alpha_effective is None else self.alpha_effective
+        blended = alpha * p_xgb + (1 - alpha) * p_dc
         blended = blended / blended.sum()
-        p_home, p_draw, p_away = self._calibrate(blended)
+        p_home, p_draw, p_away = self._temper(self._calibrate(blended))
 
         return {"p_home": float(p_home), "p_draw": float(p_draw),
-                "p_away": float(p_away), "score_matrix": M}
+                "p_away": float(p_away), "score_matrix": M,
+                "p_xgb": [float(x) for x in p_xgb], "p_dc": [float(x) for x in p_dc]}
 
 
 def _fit_calibrators(blended_val, y_val_arr, sample_weight=None):

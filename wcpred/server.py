@@ -12,6 +12,7 @@ once real results land, closing the loop: predict -> result lands -> refresh
 
 import os
 import threading
+import time
 
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
@@ -23,7 +24,7 @@ from wcpred.fixtures import (
     resolve_slots_for_date,
 )
 from wcpred.model_wdl import MATCH_NEUTRAL, MATCH_WEIGHT
-from wcpred import dashboard, ensemble, ledger, market, simulate
+from wcpred import dashboard, ensemble, feedback, ledger, market, simulate
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -51,6 +52,8 @@ def build_state(state=None, force_refresh=False, sim_n=5000, seed=42):
     asof = pd.Timestamp.today().normalize()
     print("[server] building ensemble predictor (XGBoost + Dixon-Coles) ...")
     predictor = ensemble.build(dataset, long, final_elo, asof)
+    adj = feedback.apply(predictor, results)
+    print("[server] " + feedback.summary_line(adj))
 
     print(f"[server] simulating {sim_n} tournament completions ...")
     sim_table = simulate.run(bracket, predictor, n=sim_n, seed=seed)
@@ -169,6 +172,7 @@ def create_app(state):
         card["alpha_base"] = state.predictor.alpha_base
         card["results_max_date"] = str(state.results["date"].max().date())
         card["built_at"] = state.built_at
+        card["feedback"] = state.predictor.feedback_info
         return jsonify(card)
 
     @app.post("/api/refresh")
@@ -193,10 +197,39 @@ def create_app(state):
     return app
 
 
+def start_auto_refresh(state, interval_min):
+    """Spawn a daemon thread that force-refreshes results + rebuilds state
+    every `interval_min` minutes, so a long-running server keeps itself
+    current instead of freezing at startup state. Uses the same lock as
+    /api/refresh (skips a tick if a manual refresh is in flight). interval_min
+    <= 0 disables it."""
+    if not interval_min or interval_min <= 0:
+        return None
+
+    def loop():
+        while True:
+            time.sleep(interval_min * 60)
+            if not state.lock.acquire(blocking=False):
+                continue  # a manual refresh is running; skip this tick
+            try:
+                print("[server] auto-refresh tick ...", flush=True)
+                build_state(state, force_refresh=True)
+                print(f"[server] auto-refresh done; built_at={state.built_at}", flush=True)
+            except Exception as exc:  # a bad refresh must not kill the timer
+                print(f"[server] auto-refresh failed ({exc!r}); will retry next tick.", flush=True)
+            finally:
+                state.lock.release()
+
+    t = threading.Thread(target=loop, name="auto-refresh", daemon=True)
+    t.start()
+    return t
+
+
 if __name__ == "__main__":
     import warnings
 
     warnings.filterwarnings("ignore")
     state = build_state()
+    start_auto_refresh(state, interval_min=30)
     app = create_app(state)
     app.run(host="127.0.0.1", port=8000)

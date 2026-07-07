@@ -3,71 +3,89 @@
 Guidance for Claude Code when working in this repo.
 
 ## What this is
-A 2026 FIFA World Cup match predictor. Today it is a single well-documented file, `predict_today.py` (~418
-lines): given two team names it prints Win/Draw/Loss probabilities and saves a branded bar chart to
-`predictions/<date>/`. Built as a readable, forkable "first real ML project" — no notebooks, no framework.
+A 2026 FIFA World Cup match predictor. It began as a single file (`predict_today.py`) and is now a small,
+forkable `wcpred/` package: an XGBoost + Dixon-Coles ensemble that predicts Win/Draw/Loss + full scorelines,
+Monte-Carlo's the knockout bracket for championship odds, compares itself to Polymarket, and **learns from its
+own track record** — every prediction is logged and, once results land, scored and fed back into future
+predictions. It ships both a CLI and an interactive web front end. Still no notebooks, no heavy framework.
 
 ## How to run
 ```
 pip install -r requirements.txt
-python predict_today.py "Portugal" "Spain"      # order doesn't matter
-python predict_today.py                          # prompts for the two teams
+
+# interactive web front end (recommended) — pick teams, live bracket, self-scoring report card
+python -m wcpred.cli serve                        # http://localhost:8000, auto-refreshes every 30 min
+
+# CLI
+python -m wcpred.cli match "Portugal" "Spain"     # single match (order doesn't matter)
+python predict_today.py "Portugal" "Spain"        # same thing, back-compat shim
+python -m wcpred.cli today                         # every resolvable fixture today
+python -m wcpred.cli sim --n 20000                 # championship odds (Monte Carlo bracket)
+python -m wcpred.cli bracket                        # resolved bracket + survival probabilities
+python -m wcpred.cli edge                           # model vs. Polymarket disagreement
+python -m wcpred.cli backtest                       # walk-forward accuracy/log-loss/Brier
+python -m wcpred.cli score                           # score the prediction ledger vs real results
+python -m wcpred.cli dashboard                        # write a self-contained static dashboard.html
 ```
 Fixtures (date/group/stadium) are read from `data_cache/fixtures.csv`. The ~5MB historical results file
-auto-downloads to `data_cache/results.csv` on first run (gitignored).
+auto-downloads to `data_cache/results.csv` and refreshes when >6h stale (gitignored).
 
-## Architecture (current)
-Everything lives in `predict_today.py`, in this pipeline:
-- **Data** — `fetch_results` / `load_results` pull the open `martj42/international_results` CSV; `NAME_MAP` /
-  `FIXTURE_NAME_MAP` normalize country spellings.
-- **Features** — `compute_elo` (from-scratch Elo since 2006, margin- and upset-adjusted, +60 home bonus),
-  `add_form_features` (win rate + goal diff over last 5/10, rest days), `add_h2h_features` (historical
-  head-to-head). Assembled by `build_dataset`. `per_team_long` reshapes matches to one row per team-match.
-- **Model** — `train_model`: XGBoost `multi:softprob` (3 classes), trained per-match on data strictly before
-  the match date (`split_by_date`) so there's no future leakage. `predict_symmetric` averages the A-vs-B and
-  B-vs-A predictions to remove home-order bias.
-- **Fixtures/CLI** — `find_fixture`, `map_fixture_name`, `list_team_names` resolve user input against
-  `fixtures.csv`. `make_chart` renders the branded PNG; `tag_match` labels LOCK/LEAN/TOSS-UP + upset flag.
-
-Reuse these functions — don't reinvent them. Key line refs: `compute_elo`:137, `per_team_long`:156,
-`predict_symmetric`:268, `find_fixture`:290, `make_chart`:320, `split_by_date`:211, `train_model`:217.
+## Architecture
+Flat `wcpred/` package. Reuse these — don't reinvent them:
+- **`data.py`** — `fetch_results`/`load_results` pull the open `martj42/international_results` CSV (6h refresh
+  TTL, stale-cache-beats-failure); `NAME_MAP`/`FIXTURE_NAME_MAP` normalize spellings; `per_team_long`,
+  `add_label_and_context`, `tournament_weight`.
+- **`features.py`** — `compute_elo` (from-scratch Elo since 2006, margin/upset-adjusted, +60 home), form &
+  h2h features, `build_dataset`, `build_match_row` (leakage-safe as-of features).
+- **`model_wdl.py`** — XGBoost `multi:softprob`; `split_by_date` (TRAIN_START 2006, VAL_START 2023),
+  `train_model`, `predict_symmetric` (A-vs-B / B-vs-A averaging to kill home-order bias).
+- **`model_goals.py`** — Dixon-Coles bivariate Poisson: time-decayed `fit`, `score_matrix`, `wdl_from_matrix`.
+- **`ensemble.py`** — `build` blends XGBoost + Dixon-Coles (log-loss-optimal `alpha`) and fits per-class
+  isotonic calibrators on the temporal val slice, recency-weighted. `Predictor.predict` returns W/D/L +
+  score matrix + the per-model components; carries the optional ledger-feedback layer (temperature +
+  `alpha_effective`) — defaults are a no-op, so `build` stays pure.
+- **`feedback.py`** — the "learn from whether it was right" layer. Fits a small, regularized adjustment
+  (confidence temperature + tournament blend re-weight) on the ledger's ACCUMULATED scored predictions;
+  shrinks to a no-op with few matches. Applied for LIVE predictions only, never inside `build`/`backtest`.
+- **`ledger.py`** — append-only `ledger/predictions.csv` (git-tracked). `log_prediction`/`log_upcoming`
+  (pre-registration), `score`, `report_card`. Honest-only headline (results unknown at log time).
+- **`simulate.py`** — `run` Monte Carlo's the knockout bracket → per-team P(R16..Champion).
+- **`fixtures.py`** — `parse_bracket` (Match 73-104, resolves winners from the live feed), `find_fixture`,
+  `find_bracket_match`, `resolve_slots_for_date`, `compute_group_standings`.
+- **`market.py`** — Polymarket Gamma API (`tournament_winner`, `match`), de-vig, 6h cache.
+- **`backtest.py`** — walk-forward vs no-skill baseline AND Polymarket. Uses `ensemble.build` directly
+  (NO feedback — that would be leakage).
+- **`viz.py`** — charts (palette `ORANGE/BLUE/GRAY`, `INK/MUTE/GRID`).
+- **`dashboard.py`** — writes a self-contained static `dashboard.html` (no server).
+- **`server.py`** + **`static/`** — Flask API + vanilla-JS front end; builds state once at startup, a daemon
+  thread auto-refreshes (results re-pull + rescore + recalibrate) every `--refresh-interval` min, and the
+  page auto-polls. Reuses `dashboard.py`'s payload builders + design system.
+- **`cli.py`** — argparse: `match today sim bracket backtest edge dashboard score serve`.
 
 ## Current tournament state (important)
-It is **2026-07-03, mid-tournament**. The group stage is finished and the Round of 32 is in progress. The live
-`martj42` results feed is current through today: played matches (incl. R32 through 07-02) have real scores;
-07-03+ matches show `NA`. So Elo/form are already up to date and the bracket is deterministic from here.
-Bracket map in `fixtures.csv`: Match 73–88 = R32, 89–96 = R16, 97–100 = QF, 101–102 = SF, 103 = 3rd place,
-104 = Final.
+Mid-tournament, **Round of 16 in progress** (final is 2026-07-19). The live `martj42` feed is authoritative:
+played matches carry real scores, not-yet-played show `NA`, and it lags real kickoff by hours-to-days (so a
+just-ended match may not be scoreable immediately — the report card surfaces `results_max_date` for this).
+The bracket parser takes however many knockout rows the feed has resolved (not a fixed count) and falls back
+to symbolic "Winner match N" refs for the rest.
 
-## Known limitations (from the README)
-Rates teams not lineups (no injuries/suspensions/xG/tactics); under-calls draws (W/D/L models do); single-match
-only — can't give tournament-winner odds. Judge quality over many games with log-loss, not single results.
+## The closed learning loop (how "it learns from being right/wrong" actually works)
+1. Every prediction (CLI or web) is logged to the ledger, tagged honest if the result wasn't yet known.
+2. As results land (auto-refresh, `score`, or the UI Refresh button), honest predictions are scored
+   (accuracy / log-loss / Brier vs no-skill baseline and vs Polymarket).
+3. New results retrain Elo/form/Dixon-Coles/XGBoost, AND `feedback.py` fits a regularized temperature +
+   blend adjustment on the accumulated scored ledger, applied to future live predictions. It grows with
+   evidence and shrinks toward no-op when few matches exist — so single-match noise can't swing the model.
 
-## Planned upgrade: "supercharged" predictor
-Scope = major upgrade keeping the forkable spirit; grow the one file into a small `wcpred/` package (~6 modules
-+ thin CLI). `predict_today.py` stays as a back-compat entry point. Roadmap:
-1. **Dixon-Coles bivariate Poisson goals model** (`model_goals.py`) — time-decayed attack/defense strengths +
-   low-score correction. Predicts full scoreline matrices, fixing the draw under-call. Reuse `per_team_long`.
-2. **Ensemble + calibration** (`ensemble.py`) — blend XGBoost W/D/L with Dixon-Coles, calibrate on a temporal
-   holdout (isotonic/temperature). Keep `predict_symmetric` de-biasing.
-3. **Tournament Monte Carlo** (`simulate.py`) — parse the resolved bracket, simulate remaining knockouts ~20k×
-   (extra-time/penalty logic for drawn knockouts), output per-team P(R16/QF/SF/Final/Champion). Knockout-only
-   since groups are done.
-4. **Polymarket integration** (`market.py`) — free public Gamma API (`https://gamma-api.polymarket.com`, no
-   auth) for tournament-winner + per-match odds; de-vig; power an `edge` (model-vs-market) command + optional
-   prior.
-5. **Backtest harness** (`backtest.py`) — walk-forward accuracy/log-loss/Brier vs the no-skill baseline AND vs
-   Polymarket, using this tournament's already-played matches as ground truth.
-6. **Shareable viz** (`viz.py`) — scoreline heatmaps, championship-odds bars, "road to the final" bracket,
-   optional self-contained `dashboard.html`. Reuse existing palette (`ORANGE/BLUE/GRAY`, INK/MUTE/GRID).
-7. **CLI** (`cli.py`, argparse) — `match`, `today`, `sim`, `bracket`, `backtest`, `edge`.
-
-xG is deferred to future work: no clean free *international* xG feed exists; the goals model captures most of
-that signal for national teams.
+## Known limitations
+Rates teams not lineups (no injuries/suspensions/xG/tactics). W/D/L models under-call draws (the Dixon-Coles
+half mitigates this). Feedback is deliberately conservative: with a handful of scored matches it barely moves
+the model (by design). Free-data feed lag means "live" scoring isn't instant. Judge quality over many games
+with log-loss, not single results. xG deferred — no clean free *international* xG feed exists.
 
 ## Conventions
 - Free data only (open `martj42` dataset + Polymarket free API). No API keys, no paid feeds.
-- Never let a model train on data at/after the match date — preserve the `split_by_date` cutoff discipline.
-- Keep it forkable: small readable files, no framework, no notebooks.
-- Deps live in `requirements.txt` (pandas, numpy, requests, xgboost, scikit-learn, matplotlib; +scipy for the
-  goals model).
+- Never let a model train on data at/after the match date — preserve the `split_by_date` cutoff discipline,
+  and keep `feedback` out of `ensemble.build`/`backtest` (leakage).
+- Keep it forkable: small readable files, no framework beyond a thin Flask app, no notebooks.
+- Deps in `requirements.txt`: pandas, numpy, requests, xgboost, scikit-learn, matplotlib, scipy, flask.
