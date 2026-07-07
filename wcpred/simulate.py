@@ -20,7 +20,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from wcpred.data import load_results
+from wcpred.data import load_results, tournament_today
 from wcpred.fixtures import FIXTURES_PATH, parse_bracket
 
 MATCH_WEIGHT = 4      # FIFA World Cup tournament_weight (see wcpred.model_wdl)
@@ -155,7 +155,7 @@ class _FallbackPredictor:
 
         dataset, self.final_elo = build_dataset(results)
         self.long = per_team_long(results)
-        self.asof = pd.Timestamp.today().normalize()
+        self.asof = tournament_today()
         train, val = split_by_date(dataset, TRAIN_START, VAL_START, self.asof)
         self.model, _, _ = train_model(train, val)
 
@@ -194,7 +194,7 @@ if __name__ == "__main__":
         print("Building ensemble predictor (XGBoost + Dixon-Coles, blended + calibrated) ...")
         dataset, final_elo = build_dataset(results)
         long = per_team_long(results)
-        asof = pd.Timestamp.today().normalize()
+        asof = tournament_today()
         predictor = build_ensemble(dataset, long, final_elo, asof)
     except Exception as exc:
         used_fallback = True

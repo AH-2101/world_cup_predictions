@@ -2,6 +2,8 @@
 
 import os
 import time
+from zoneinfo import ZoneInfo
+
 import numpy as np
 import pandas as pd
 import requests
@@ -9,6 +11,20 @@ import requests
 CACHE_DIR = "data_cache"
 RESULTS_URL = "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
 RESULTS_STALE_SECONDS = 6 * 3600  # refetch cache older than 6 hours, mirrors wcpred.market's TTL
+
+# The 2026 World Cup is played across North American venues (US Eastern to
+# Pacific). Anchor "today" to the westmost tournament timezone so the current
+# match-day stays aligned with when games actually finish. Using UTC instead
+# rolls the date to "tomorrow" the instant it passes midnight UTC — which is
+# mid-evening in the Americas, so a game still in progress (e.g. a 07-06 R16
+# tie) would wrongly drop off "today's" slate and the app would look a day ahead.
+TOURNAMENT_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def tournament_today():
+    """Normalized (midnight) current date in the tournament's local timezone,
+    returned tz-naive to match the rest of the pipeline's timestamps."""
+    return pd.Timestamp.now(TOURNAMENT_TZ).normalize().tz_localize(None)
 
 # normalizes the historical results.csv team names
 NAME_MAP = {

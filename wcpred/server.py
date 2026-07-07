@@ -17,7 +17,7 @@ import time
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
-from wcpred.data import load_results, per_team_long
+from wcpred.data import load_results, per_team_long, tournament_today
 from wcpred.features import build_dataset
 from wcpred.fixtures import (
     FIXTURES_PATH, find_bracket_match, find_fixture, list_team_names, parse_bracket,
@@ -49,7 +49,7 @@ def build_state(state=None, force_refresh=False, sim_n=5000, seed=42):
     long = per_team_long(results)
     bracket = parse_bracket(FIXTURES_PATH, results)
 
-    asof = pd.Timestamp.today().normalize()
+    asof = tournament_today()
     print("[server] building ensemble predictor (XGBoost + Dixon-Coles) ...")
     predictor = ensemble.build(dataset, long, final_elo, asof)
     adj = feedback.apply(predictor, results)
@@ -92,7 +92,7 @@ def _resolve_match(state, team_a, team_b):
     away = next((t for t in valid if t.lower() == team_b.strip().lower()), None)
     if home is None or away is None:
         return None
-    today_str = pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+    today_str = tournament_today().strftime("%Y-%m-%d")
     return {"match_number": "", "group": "Friendly", "stadium": "", "date": today_str,
             "home_disp": home, "away_disp": away, "home": home, "away": away}
 
@@ -115,7 +115,7 @@ def create_app(state):
 
     @app.get("/api/today")
     def api_today():
-        date = request.args.get("date") or pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+        date = request.args.get("date") or tournament_today().strftime("%Y-%m-%d")
         slots = resolve_slots_for_date(state.results, date)
         return jsonify([dashboard._match_payload(m, state.predictor, state.final_elo) for m in slots])
 

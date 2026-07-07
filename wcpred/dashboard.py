@@ -12,7 +12,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from wcpred.data import load_results, per_team_long
+from wcpred.data import load_results, per_team_long, tournament_today
 from wcpred.features import build_dataset, ELO_BASE
 from wcpred.model_wdl import MATCH_NEUTRAL, MATCH_WEIGHT
 from wcpred.fixtures import FIXTURES_PATH, parse_bracket, resolve_slots_for_date
@@ -67,7 +67,7 @@ def build_data(sim_n=5000, seed=42):
     long = per_team_long(results)
     bracket = parse_bracket(FIXTURES_PATH, results)
 
-    asof = pd.Timestamp.today().normalize()
+    asof = tournament_today()
     date_str = asof.strftime("%Y-%m-%d")
     predictor = ensemble.build(dataset, long, final_elo, asof)
     feedback.apply(predictor, results)  # learn from the ledger's track record

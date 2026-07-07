@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss
 
+from wcpred.data import tournament_today
 from wcpred.fixtures import resolve_slots_for_date
 from wcpred.model_wdl import MATCH_NEUTRAL, MATCH_WEIGHT
 
@@ -105,7 +106,7 @@ def log_upcoming(predictor, results, days_ahead=3, source="auto"):
     was known. Idempotent per calendar day: won't double-log the same
     (source, home, away, match_date) on the same day."""
     existing = load_ledger()
-    today = pd.Timestamp.today().normalize()
+    today = tournament_today()
     already = set()
     if not existing.empty:
         todays = existing[(existing["source"] == source)

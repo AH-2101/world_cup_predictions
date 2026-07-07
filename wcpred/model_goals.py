@@ -265,13 +265,13 @@ def wdl_from_matrix(M):
 
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
-    from wcpred.data import load_results, per_team_long
+    from wcpred.data import load_results, per_team_long, tournament_today
 
     print("Loading results + building per-team long format ...")
     results = load_results()
     long = per_team_long(results)
 
-    asof = pd.Timestamp.today().normalize()
+    asof = tournament_today()
     params = fit(long, asof, halflife_days=180)
     print(f"Fit Dixon-Coles as of {asof.date()}  "
           f"(teams={len(params['teams'])}, matches={params['n_matches']}, "

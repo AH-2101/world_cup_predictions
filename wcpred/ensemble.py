@@ -197,7 +197,7 @@ if __name__ == "__main__":
     import warnings
 
     warnings.filterwarnings("ignore")
-    from wcpred.data import load_results, per_team_long
+    from wcpred.data import load_results, per_team_long, tournament_today
     from wcpred.features import build_dataset
 
     print("Loading results + building dataset ...")
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     dataset, final_elo = build_dataset(results)
     long = per_team_long(results)
 
-    asof = pd.Timestamp.today().normalize()
+    asof = tournament_today()
     predictor = build(dataset, long, final_elo, asof)
 
     print(f"\nBlend weight alpha (XGBoost share) : {predictor.alpha:.3f}")

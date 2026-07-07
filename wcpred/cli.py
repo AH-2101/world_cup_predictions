@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 
-from wcpred.data import load_results, per_team_long
+from wcpred.data import load_results, per_team_long, tournament_today
 from wcpred.features import build_dataset, ELO_BASE
 from wcpred.model_wdl import MATCH_WEIGHT, MATCH_NEUTRAL
 from wcpred.fixtures import (
@@ -155,7 +155,7 @@ def _cmd_match(args):
 
 # ── today ────────────────────────────────────────────────────────────────────────
 def run_today(date=None):
-    date = date or pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+    date = date or tournament_today().strftime("%Y-%m-%d")
     print(f"\nLoading data + building features (slate date {date}) ...")
     results = load_results()
     dataset, final_elo = build_dataset(results)
@@ -184,7 +184,7 @@ def _cmd_today(args):
 def _build_predictor_today(results):
     dataset, final_elo = build_dataset(results)
     long = per_team_long(results)
-    asof = pd.Timestamp.today().normalize()
+    asof = tournament_today()
     predictor = ensemble.build(dataset, long, final_elo, asof)
     feedback.apply(predictor, results)  # learn from the ledger's track record
     return predictor, asof
