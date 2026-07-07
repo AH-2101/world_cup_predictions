@@ -43,6 +43,18 @@ WEIGHT_PRUNE_THRESHOLD = 1e-8  # drop matches whose time-decay weight is negligi
 HOME_ADV_INIT = 0.25
 RHO_INIT = -0.05
 
+# Safety clip on the log-rate (home_adv + attack - defense) before exponentiating,
+# both during fitting and at prediction time. Unbounded L-BFGS-B can occasionally
+# take a bad step early in optimization that overflows np.exp(); once that happens
+# the gradient becomes non-finite and the optimizer never recovers, "converging" to
+# an unusable fit (observed: home_advantage=109, attack as extreme as -1064). A
+# healthy fit's log-rate sits well within [-1, 2] (lambda ~ 0.4-7 goals), so this
+# clip only ever activates in a diverging fit and is otherwise a no-op. It also
+# guarantees score_matrix's Poisson pmf always has non-negligible mass within
+# max_goals, so normalizing (M / M.sum()) can never divide by ~0 into NaN.
+LOG_RATE_MIN, LOG_RATE_MAX = -6.0, 3.0   # lambda/mu in [~0.0025, ~20]
+PARAM_BOUND = 6.0                          # hard ceiling on attack/defense/home_adv
+
 _CACHE = {}  # (asof: pd.Timestamp, halflife_days: int) -> params dict
 
 
@@ -139,8 +151,10 @@ def fit(long, asof, halflife_days=180):
 
     def nll_and_grad(x):
         attack, defense, home_adv, rho = unpack(x)
-        lam = np.exp(home_adv + attack[h_idx] - defense[a_idx])
-        mu = np.exp(attack[a_idx] - defense[h_idx])
+        log_lam = np.clip(home_adv + attack[h_idx] - defense[a_idx], LOG_RATE_MIN, LOG_RATE_MAX)
+        log_mu = np.clip(attack[a_idx] - defense[h_idx], LOG_RATE_MIN, LOG_RATE_MAX)
+        lam = np.exp(log_lam)
+        mu = np.exp(log_mu)
 
         loglik = weight * (hg * np.log(lam) - lam - gammaln(hg + 1)
                            + ag * np.log(mu) - mu - gammaln(ag + 1))
@@ -198,7 +212,7 @@ def fit(long, asof, halflife_days=180):
     x0 = np.zeros(2 * n + 2)
     x0[2 * n] = HOME_ADV_INIT
     x0[2 * n + 1] = RHO_INIT
-    bounds = [(None, None)] * (2 * n + 1) + [(-0.9, 0.9)]
+    bounds = [(-PARAM_BOUND, PARAM_BOUND)] * (2 * n + 1) + [(-0.9, 0.9)]
 
     res = minimize(nll_and_grad, x0, jac=True, method="L-BFGS-B", bounds=bounds,
                     options={"maxiter": 300})
@@ -234,8 +248,8 @@ def score_matrix(params, home, away, max_goals=10):
     a_a = attack.get(away, avg_a)
     d_a = defense.get(away, avg_d)
 
-    lam = float(np.exp(home_adv + a_h - d_a))
-    mu = float(np.exp(a_a - d_h))
+    lam = float(np.exp(np.clip(home_adv + a_h - d_a, LOG_RATE_MIN, LOG_RATE_MAX)))
+    mu = float(np.exp(np.clip(a_a - d_h, LOG_RATE_MIN, LOG_RATE_MAX)))
 
     goals = np.arange(max_goals + 1)
     p_home_goals = poisson.pmf(goals, lam)
