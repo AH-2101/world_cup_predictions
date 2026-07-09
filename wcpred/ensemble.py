@@ -54,7 +54,8 @@ def _dc_val_probs(params, val):
     home/away teams as-is (the label already reflects that assignment)."""
     out = np.empty((len(val), 3))
     for i, row in enumerate(val.itertuples()):
-        M = model_goals.score_matrix(params, row.home_team, row.away_team)
+        M = model_goals.score_matrix(params, row.home_team, row.away_team,
+                                     neutral=bool(row.neutral))
         p_home, p_draw, p_away = model_goals.wdl_from_matrix(M)
         out[i] = (p_home, p_draw, p_away)
     return out
@@ -95,7 +96,7 @@ class Predictor:
         p_xgb = np.array(predict_symmetric(
             self.model, self.long, self.final_elo, home, away, self.asof, neutral, weight
         ))
-        M = model_goals.score_matrix(self.params, home, away)
+        M = model_goals.score_matrix(self.params, home, away, neutral=bool(neutral))
         p_dc = np.array(model_goals.wdl_from_matrix(M))
 
         alpha = self.alpha if self.alpha_effective is None else self.alpha_effective

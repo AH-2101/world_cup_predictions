@@ -109,10 +109,10 @@ def add_label_and_context(r):
 def per_team_long(r):
     home = pd.DataFrame({"date": r["date"].values, "team": r["home_team"].values,
                          "opp": r["away_team"].values, "gf": r["home_score"].values,
-                         "ga": r["away_score"].values})
+                         "ga": r["away_score"].values, "neutral": r["neutral"].values})
     away = pd.DataFrame({"date": r["date"].values, "team": r["away_team"].values,
                          "opp": r["home_team"].values, "gf": r["away_score"].values,
-                         "ga": r["home_score"].values})
+                         "ga": r["home_score"].values, "neutral": r["neutral"].values})
     long = pd.concat([home, away], ignore_index=True)
     long["result"] = np.where(long["gf"] > long["ga"], 1.0,
                               np.where(long["gf"] == long["ga"], 0.5, 0.0))

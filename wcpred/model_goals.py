@@ -9,8 +9,11 @@ matrix.
 
 Model
 -----
-    home_goals ~ Poisson(lambda),  lambda = exp(home_adv + attack[home] - defense[away])
+    home_goals ~ Poisson(lambda),  lambda = exp(home_adv·is_true_home + attack[home] - defense[away])
     away_goals ~ Poisson(mu),      mu     = exp(attack[away] - defense[home])
+
+where `is_true_home` is 0 for neutral-venue matches (most World Cup finals
+games), so home advantage is neither learned from nor applied to them.
 
 with the independence assumption relaxed for the four low-score cells via the
 Dixon-Coles tau adjustment (see `_tau_scalar` / the vectorized version inside
@@ -60,13 +63,19 @@ _CACHE = {}  # (asof: pd.Timestamp, halflife_days: int) -> params dict
 
 # ── match reconstruction ─────────────────────────────────────────────────────────
 def _pair_matches(long):
-    """Recover one row per real match (date, home, away, hg, ag) from the
-    per_team_long two-rows-per-match shape. See module docstring for the
+    """Recover one row per real match (date, home, away, hg, ag, neutral) from
+    the per_team_long two-rows-per-match shape. See module docstring for the
     ordering assumption this relies on."""
     long = long.reset_index(drop=True)
+    if "neutral" not in long.columns:
+        warnings.warn(
+            "model_goals: `long` has no 'neutral' column; treating every match "
+            "as a true home match (pre-neutral-awareness behavior).", RuntimeWarning,
+        )
+        long = long.assign(neutral=0)
     n = len(long)
     if n == 0:
-        return pd.DataFrame(columns=["date", "home", "away", "hg", "ag"])
+        return pd.DataFrame(columns=["date", "home", "away", "hg", "ag", "neutral"])
 
     if n % 2 == 0:
         h = n // 2
@@ -86,6 +95,7 @@ def _pair_matches(long):
                 "away": home_half["opp"].values,
                 "hg": home_half["gf"].values.astype(float),
                 "ag": home_half["ga"].values.astype(float),
+                "neutral": home_half["neutral"].values.astype(float),
             })
 
     # Fallback: `long` wasn't in the standard home-block/away-block order (e.g.
@@ -107,7 +117,8 @@ def _pair_matches(long):
             continue
         r0 = grp.sort_values("_row").iloc[0]
         rows.append({"date": r0["date"], "home": r0["team"], "away": r0["opp"],
-                     "hg": float(r0["gf"]), "ag": float(r0["ga"])})
+                     "hg": float(r0["gf"]), "ag": float(r0["ga"]),
+                     "neutral": float(r0["neutral"])})
     return pd.DataFrame(rows)
 
 
@@ -140,6 +151,9 @@ def fit(long, asof, halflife_days=180):
     a_idx = matches["away"].map(team_idx).values
     hg = matches["hg"].values.astype(float)
     ag = matches["ag"].values.astype(float)
+    # home advantage only applies where the nominal home side truly played at
+    # home; neutral-site matches (most World Cup finals games) get none.
+    home_ind = 1.0 - matches["neutral"].values.astype(float)
 
     m00 = (hg == 0) & (ag == 0)
     m01 = (hg == 0) & (ag == 1)
@@ -151,7 +165,7 @@ def fit(long, asof, halflife_days=180):
 
     def nll_and_grad(x):
         attack, defense, home_adv, rho = unpack(x)
-        log_lam = np.clip(home_adv + attack[h_idx] - defense[a_idx], LOG_RATE_MIN, LOG_RATE_MAX)
+        log_lam = np.clip(home_adv * home_ind + attack[h_idx] - defense[a_idx], LOG_RATE_MIN, LOG_RATE_MAX)
         log_mu = np.clip(attack[a_idx] - defense[h_idx], LOG_RATE_MIN, LOG_RATE_MAX)
         lam = np.exp(log_lam)
         mu = np.exp(log_mu)
@@ -191,7 +205,7 @@ def fit(long, asof, halflife_days=180):
         d_defense_a = weight * (-(hg - lam) - dlam_tau * lam)
         d_attack_a = weight * ((ag - mu) + dmu_tau * mu)
         d_defense_h = weight * (-(ag - mu) - dmu_tau * mu)
-        d_home_adv = weight * ((hg - lam) + dlam_tau * lam)
+        d_home_adv = weight * ((hg - lam) + dlam_tau * lam) * home_ind
         d_rho = weight * drho
 
         g_attack = np.zeros(n)
@@ -214,8 +228,10 @@ def fit(long, asof, halflife_days=180):
     x0[2 * n + 1] = RHO_INIT
     bounds = [(-PARAM_BOUND, PARAM_BOUND)] * (2 * n + 1) + [(-0.9, 0.9)]
 
+    # 300 iterations stops just short of L-BFGS-B's own convergence test on the
+    # full ~12.5k-match fit (it needs ~450); the extra headroom costs <1s.
     res = minimize(nll_and_grad, x0, jac=True, method="L-BFGS-B", bounds=bounds,
-                    options={"maxiter": 300})
+                    options={"maxiter": 800})
 
     attack, defense, home_adv, rho = unpack(res.x)
     params = {
@@ -236,12 +252,13 @@ def fit(long, asof, halflife_days=180):
 
 
 # ── prediction ───────────────────────────────────────────────────────────────────
-def score_matrix(params, home, away, max_goals=10):
-    """P(home scores i, away scores j) for i, j in 0..max_goals, Dixon-Coles
-    tau-corrected on the 4 low-score cells, normalized to sum to 1."""
+def rates(params, home, away, neutral=False):
+    """(lam, mu) expected-goal rates for home vs away. Home advantage is only
+    applied when the match is genuinely at `home`'s ground (`neutral=False`);
+    at a neutral venue the nominal home side gets no boost."""
     attack, defense = params["attack"], params["defense"]
     avg_a, avg_d = params["avg_attack"], params["avg_defense"]
-    home_adv, rho = params["home_advantage"], params["rho"]
+    home_adv = 0.0 if neutral else params["home_advantage"]
 
     a_h = attack.get(home, avg_a)
     d_h = defense.get(home, avg_d)
@@ -250,7 +267,12 @@ def score_matrix(params, home, away, max_goals=10):
 
     lam = float(np.exp(np.clip(home_adv + a_h - d_a, LOG_RATE_MIN, LOG_RATE_MAX)))
     mu = float(np.exp(np.clip(a_a - d_h, LOG_RATE_MIN, LOG_RATE_MAX)))
+    return lam, mu
 
+
+def matrix_from_rates(lam, mu, rho, max_goals=10):
+    """Scoreline matrix from Poisson rates: outer product of pmfs, Dixon-Coles
+    tau on the 4 low-score cells, clipped and normalized to sum to 1."""
     goals = np.arange(max_goals + 1)
     p_home_goals = poisson.pmf(goals, lam)
     p_away_goals = poisson.pmf(goals, mu)
@@ -265,6 +287,13 @@ def score_matrix(params, home, away, max_goals=10):
     M = np.clip(M, 0, None)
     M = M / M.sum()
     return M
+
+
+def score_matrix(params, home, away, max_goals=10, neutral=False):
+    """P(home scores i, away scores j) for i, j in 0..max_goals, Dixon-Coles
+    tau-corrected on the 4 low-score cells, normalized to sum to 1."""
+    lam, mu = rates(params, home, away, neutral=neutral)
+    return matrix_from_rates(lam, mu, params["rho"], max_goals=max_goals)
 
 
 def wdl_from_matrix(M):
