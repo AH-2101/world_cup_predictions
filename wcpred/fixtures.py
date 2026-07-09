@@ -351,27 +351,37 @@ def parse_bracket(fixtures_path, results):
         }
 
     # Knockout draws: the raw feed records the 90-minute score, so a tied
-    # played match was actually decided by extra time / penalties. We don't
-    # have a separate PK model, but we don't need one -- whichever of the two
-    # tied teams shows up in an already-resolved later fixture is the one that
-    # actually advanced. Fall back to an alphabetical (deterministic, never
-    # crashes) tiebreak in the unlikely case neither shows up yet.
-    later_teams = set()
-    for later_mno in range(89, 97):
-        s = slots.get(later_mno)
-        if s is not None:
-            later_teams.add(s["resolved_home"])
-            later_teams.add(s["resolved_away"])
+    # played match was actually decided by extra time / penalties. The feed
+    # itself reveals who advanced: once the next round's pairing resolves, the
+    # advancing team's name appears in that later row, and fixtures.csv's
+    # placeholder text ("Winner match 96 v ...") says exactly which slot each
+    # resolved name settles. (The 3rd-place match's "Runner-up match N" refs
+    # settle a tied semi-final the same way, via the loser.) Fall back to an
+    # alphabetical (deterministic, never crashes) tiebreak while the later
+    # pairing is still unrevealed.
+    known_winner, known_loser = {}, {}
+    for slot in slots.values():
+        parts = [p.strip() for p in str(slot["raw_text"]).split(" v ")]
+        if len(parts) != 2:
+            continue
+        for src, resolved in zip(map(_parse_ref, parts),
+                                 (slot["resolved_home"], slot["resolved_away"])):
+            kind, ref = src
+            if resolved is None:
+                continue
+            if kind == "winner_of":
+                known_winner[ref] = resolved
+            elif kind == "loser_of":
+                known_loser[ref] = resolved
     for slot in slots.values():
         if slot["played"] and slot["winner"] is None:
             h, a = slot["resolved_home"], slot["resolved_away"]
-            h_in, a_in = h in later_teams, a in later_teams
-            if h_in and not a_in:
-                slot["winner"] = h
-            elif a_in and not h_in:
-                slot["winner"] = a
-            else:
-                slot["winner"] = min(h, a)
+            adv = known_winner.get(slot["match_number"])
+            if adv is None:
+                lost = known_loser.get(slot["match_number"])
+                if lost in (h, a):
+                    adv = a if lost == h else h
+            slot["winner"] = adv if adv in (h, a) else min(h, a)
 
     # Everything beyond the feed's resolved knockout rows: pure "Winner match
     # N" / "Runner-up match N" references, resolved to concrete teams
