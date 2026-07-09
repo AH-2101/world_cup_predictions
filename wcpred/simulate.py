@@ -10,9 +10,12 @@ team, the fraction of simulations in which it reaches each remaining round.
 
 Already-played matches (fixed historical fact) are never simulated -- their
 recorded winner is reused every time. Only genuinely pending matches draw a
-result from the predictor. A regulation draw is broken with a coin flip
-skewed toward whichever side the predictor favored (representing extra time
-+ penalties without a separate ET/PK model).
+result from the predictor. A regulation draw is broken with a principled
+extra-time + penalties model: extra time is a 1/3-length independent-Poisson
+period at the match's expected-goal rates (so the favorite's ET edge scales
+with how lopsided the matchup is), and a still-tied game goes to a shootout
+whose probability comes from `wcpred.shootout` (a shrunk Elo-edge logistic
+fit on martj42's shootouts.csv; ~50/50 for even sides).
 """
 
 import sys
@@ -20,12 +23,14 @@ import sys
 import numpy as np
 import pandas as pd
 
+from wcpred import model_goals, shootout
 from wcpred.data import load_results, tournament_today
 from wcpred.fixtures import FIXTURES_PATH, parse_bracket
 
 MATCH_WEIGHT = 4      # FIFA World Cup tournament_weight (see wcpred.model_wdl)
 NEUTRAL = 1           # remaining 2026 knockout matches are effectively neutral-site
-ET_PK_SKEW = 0.55     # extra-time/penalty coin-flip skew toward the run-of-play favorite
+ET_LENGTH_FACTOR = 1 / 3   # extra time is 30 of 90 regulation minutes
+ET_MAX_GOALS = 6
 N_SIMS = 20000
 
 # round played in a slot -> the milestone its WINNER earns (i.e. which round
@@ -75,7 +80,29 @@ def _resolve_side(slots, sim, match_number, side):
     return outcome["winner"] if kind == "winner_of" else outcome["loser"]
 
 
-def _play(predictor, home, away, rng, cache):
+def _lambdas_from_matrix(M):
+    """Expected home/away goals as the marginal means of a score matrix --
+    fallback for predictors that don't expose lam_home/lam_away directly."""
+    goals = np.arange(M.shape[0])
+    return float(goals @ M.sum(axis=1)), float(goals @ M.sum(axis=0))
+
+
+def _p_home_given_draw(pred, predictor, home, away, pk_coef):
+    """P(home advances | regulation draw): a 1/3-length independent-Poisson
+    extra time at the match's expected-goal rates, then a shootout decided by
+    wcpred.shootout's (possibly zero) Elo-edge model."""
+    lam, mu = pred.get("lam_home"), pred.get("lam_away")
+    if lam is None or mu is None:
+        lam, mu = _lambdas_from_matrix(pred["score_matrix"])
+    M_et = model_goals.matrix_from_rates(
+        lam * ET_LENGTH_FACTOR, mu * ET_LENGTH_FACTOR, rho=0.0, max_goals=ET_MAX_GOALS)
+    p_h_et, p_d_et, _ = model_goals.wdl_from_matrix(M_et)
+    p_pk_home = shootout.p_shootout_home(
+        pk_coef, getattr(predictor, "final_elo", None), home, away)
+    return p_h_et + p_d_et * p_pk_home
+
+
+def _play(predictor, home, away, rng, cache, pk_coef=0.0):
     """Sample a W/D/L outcome for `home` vs `away` and return the winner.
     Predictions are cached per (home, away) pair within a `run()` call --
     many bracket slots (any match whose two teams are already fixed, win or
@@ -87,6 +114,7 @@ def _play(predictor, home, away, rng, cache):
     pred = cache.get(key)
     if pred is None:
         pred = predictor.predict(home, away, neutral=NEUTRAL, weight=MATCH_WEIGHT)
+        pred["_p_home_given_draw"] = _p_home_given_draw(pred, predictor, home, away, pk_coef)
         cache[key] = pred
 
     p = np.array([pred["p_home"], pred["p_draw"], pred["p_away"]], dtype=float)
@@ -94,23 +122,28 @@ def _play(predictor, home, away, rng, cache):
     outcome = rng.choice(3, p=p)  # 0=home, 1=draw, 2=away
 
     if outcome == 1:  # regulation draw -> extra time / penalties
-        favorite = "home" if pred["p_home"] >= pred["p_away"] else "away"
-        underdog = "away" if favorite == "home" else "home"
-        side = favorite if rng.random() < ET_PK_SKEW else underdog
+        side = "home" if rng.random() < pred["_p_home_given_draw"] else "away"
     else:
         side = "home" if outcome == 0 else "away"
 
     return home if side == "home" else away
 
 
-def run(bracket, predictor, n=20000, seed=42):
+def run(bracket, predictor, n=20000, seed=42, pk_coef=None):
     """Monte Carlo the remaining knockout rounds `n` times.
+
+    `pk_coef` is wcpred.shootout's Elo-edge coefficient for the penalty
+    shootout. When None it's read off `predictor.pk_coef` (set by builders
+    that have the feature dataset handy, via `shootout.fit_from_data`),
+    falling back to 0.0 = a fair coin.
 
     Returns a DataFrame[team, p_r16, p_qf, p_sf, p_final, p_champion], one
     row per still-alive team (see `_alive_teams`), sorted by p_champion
     descending. Across the *full* returned field, p_champion sums to ~1.0,
     since every simulated champion is necessarily one of these teams.
     """
+    if pk_coef is None:
+        pk_coef = getattr(predictor, "pk_coef", 0.0) or 0.0
     rng = np.random.default_rng(seed)
     slots = bracket.slots
     match_numbers = sorted(slots.keys())
@@ -128,7 +161,7 @@ def run(bracket, predictor, n=20000, seed=42):
             else:
                 home = _resolve_side(slots, sim, mno, "home")
                 away = _resolve_side(slots, sim, mno, "away")
-                winner = _play(predictor, home, away, rng, pred_cache)
+                winner = _play(predictor, home, away, rng, pred_cache, pk_coef=pk_coef)
             loser = away if winner == home else home
             sim[mno] = {"home": home, "away": away, "winner": winner, "loser": loser}
 
@@ -196,6 +229,7 @@ if __name__ == "__main__":
         long = per_team_long(results)
         asof = tournament_today()
         predictor = build_ensemble(dataset, long, final_elo, asof)
+        predictor.pk_coef = shootout.fit_from_data(dataset, before=asof)
     except Exception as exc:
         used_fallback = True
         print(f"[simulate] wcpred.ensemble unavailable ({exc!r}) -- falling back to a "

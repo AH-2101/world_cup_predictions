@@ -17,7 +17,7 @@ from wcpred.features import build_dataset, ELO_BASE
 from wcpred.model_wdl import MATCH_NEUTRAL, MATCH_WEIGHT
 from wcpred.fixtures import FIXTURES_PATH, parse_bracket, resolve_slots_for_date
 from wcpred.viz import tag_match
-from wcpred import ensemble, simulate, market, feedback
+from wcpred import ensemble, simulate, market, feedback, shootout
 
 ROAD_TOP_N = 8
 
@@ -71,6 +71,7 @@ def build_data(sim_n=5000, seed=42):
     date_str = asof.strftime("%Y-%m-%d")
     predictor = ensemble.build(dataset, long, final_elo, asof)
     feedback.apply(predictor, results)  # learn from the ledger's track record
+    predictor.pk_coef = shootout.fit_from_data(dataset, before=asof)
 
     today_matches = [_match_payload(m, predictor, final_elo)
                       for m in resolve_slots_for_date(results, date_str)]

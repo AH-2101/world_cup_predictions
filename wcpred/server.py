@@ -24,7 +24,7 @@ from wcpred.fixtures import (
     resolve_slots_for_date,
 )
 from wcpred.model_wdl import MATCH_NEUTRAL, MATCH_WEIGHT
-from wcpred import dashboard, ensemble, feedback, ledger, market, simulate
+from wcpred import dashboard, ensemble, feedback, ledger, market, shootout, simulate
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -54,6 +54,7 @@ def build_state(state=None, force_refresh=False, sim_n=5000, seed=42):
     predictor = ensemble.build(dataset, long, final_elo, asof)
     adj = feedback.apply(predictor, results)
     print("[server] " + feedback.summary_line(adj))
+    predictor.pk_coef = shootout.fit_from_data(dataset, before=asof)
 
     print(f"[server] simulating {sim_n} tournament completions ...")
     sim_table = simulate.run(bracket, predictor, n=sim_n, seed=seed)

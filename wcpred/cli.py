@@ -34,6 +34,7 @@ from wcpred.fixtures import (
 )
 from wcpred.viz import make_chart, tag_match, scoreline_heatmap, championship_bar, road_to_final
 from wcpred import ensemble
+from wcpred import shootout
 from wcpred import simulate
 from wcpred import market
 from wcpred import ledger
@@ -187,6 +188,7 @@ def _build_predictor_today(results):
     asof = tournament_today()
     predictor = ensemble.build(dataset, long, final_elo, asof)
     feedback.apply(predictor, results)  # learn from the ledger's track record
+    predictor.pk_coef = shootout.fit_from_data(dataset, before=asof)  # for simulate's ET/PK model
     return predictor, asof
 
 

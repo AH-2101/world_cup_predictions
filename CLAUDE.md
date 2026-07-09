@@ -33,13 +33,17 @@ auto-downloads to `data_cache/results.csv` and refreshes when >6h stale (gitigno
 ## Architecture
 Flat `wcpred/` package. Reuse these — don't reinvent them:
 - **`data.py`** — `fetch_results`/`load_results` pull the open `martj42/international_results` CSV (6h refresh
-  TTL, stale-cache-beats-failure); `NAME_MAP`/`FIXTURE_NAME_MAP` normalize spellings; `per_team_long`,
-  `add_label_and_context`, `tournament_weight`.
+  TTL, stale-cache-beats-failure); `load_shootouts` pulls its `shootouts.csv` the same way;
+  `NAME_MAP`/`FIXTURE_NAME_MAP` normalize spellings; `per_team_long` (carries the `neutral` flag),
+  `add_label_and_context`, `tournament_weight`. (martj42's `former_names.csv` was evaluated and skipped —
+  the results feed already backfills current names in the 2006+ window.)
 - **`features.py`** — `compute_elo` (from-scratch Elo since 2006, margin/upset-adjusted, +60 home), form &
   h2h features, `build_dataset`, `build_match_row` (leakage-safe as-of features).
 - **`model_wdl.py`** — XGBoost `multi:softprob`; `split_by_date` (TRAIN_START 2006, VAL_START 2023),
   `train_model`, `predict_symmetric` (A-vs-B / B-vs-A averaging to kill home-order bias).
-- **`model_goals.py`** — Dixon-Coles bivariate Poisson: time-decayed `fit`, `score_matrix`, `wdl_from_matrix`.
+- **`model_goals.py`** — Dixon-Coles bivariate Poisson: time-decayed, neutral-aware `fit` (home advantage
+  is learned from and applied to true-home matches only), `rates`, `matrix_from_rates`, `score_matrix`
+  (takes `neutral=`), `wdl_from_matrix`.
 - **`ensemble.py`** — `build` blends XGBoost + Dixon-Coles (log-loss-optimal `alpha`) and fits per-class
   isotonic calibrators on the temporal val slice, recency-weighted. `Predictor.predict` returns W/D/L +
   score matrix + the per-model components; carries the optional ledger-feedback layer (temperature +
@@ -49,7 +53,12 @@ Flat `wcpred/` package. Reuse these — don't reinvent them:
   shrinks to a no-op with few matches. Applied for LIVE predictions only, never inside `build`/`backtest`.
 - **`ledger.py`** — append-only `ledger/predictions.csv` (git-tracked). `log_prediction`/`log_upcoming`
   (pre-registration), `score`, `report_card`. Honest-only headline (results unknown at log time).
-- **`simulate.py`** — `run` Monte Carlo's the knockout bracket → per-team P(R16..Champion).
+- **`simulate.py`** — `run` Monte Carlo's the knockout bracket → per-team P(R16..Champion). Regulation
+  draws resolve through a real ET/PK model: 1/3-length Poisson extra time at the match's expected-goal
+  rates, then a shootout from `shootout.py`.
+- **`shootout.py`** — penalty-shootout model fit on martj42 `shootouts.csv`: a shrunk 1-param Elo-edge
+  logistic (empirically beats a coin: c≈0.45, a 400-Elo favorite wins ~61% of shootouts); degrades to
+  50/50 offline via `fit_from_data`.
 - **`fixtures.py`** — `parse_bracket` (Match 73-104, resolves winners from the live feed), `find_fixture`,
   `find_bracket_match`, `resolve_slots_for_date`, `compute_group_standings`.
 - **`market.py`** — Polymarket Gamma API (`tournament_winner`, `match`), de-vig, 6h cache.
@@ -63,11 +72,13 @@ Flat `wcpred/` package. Reuse these — don't reinvent them:
 - **`cli.py`** — argparse: `match today sim bracket backtest edge dashboard score serve`.
 
 ## Current tournament state (important)
-Mid-tournament, **Round of 16 in progress** (final is 2026-07-19). The live `martj42` feed is authoritative:
+Mid-tournament, **R16 complete, quarter-finals pending** as of 2026-07-09 (final is 2026-07-19). The live
+`martj42` feed is authoritative:
 played matches carry real scores, not-yet-played show `NA`, and it lags real kickoff by hours-to-days (so a
 just-ended match may not be scoreable immediately — the report card surfaces `results_max_date` for this).
 The bracket parser takes however many knockout rows the feed has resolved (not a fixed count) and falls back
-to symbolic "Winner match N" refs for the rest.
+to symbolic "Winner match N" refs for the rest. A tied played knockout match (90-minute score, decided on
+PKs) gets its winner read off the next round's already-resolved pairing via the fixture placeholders.
 
 ## The closed learning loop (how "it learns from being right/wrong" actually works)
 1. Every prediction (CLI or web) is logged to the ledger, tagged honest if the result wasn't yet known.
@@ -76,6 +87,15 @@ to symbolic "Winner match N" refs for the rest.
 3. New results retrain Elo/form/Dixon-Coles/XGBoost, AND `feedback.py` fits a regularized temperature +
    blend adjustment on the accumulated scored ledger, applied to future live predictions. It grows with
    evidence and shrinks toward no-op when few matches exist — so single-match noise can't swing the model.
+
+## Evaluated and rejected (don't redo these without new evidence)
+Both were implemented and walk-forward backtested (2026-07); both regressed log-loss and were reverted:
+- **Confederation features** (team→UEFA/CONMEBOL/... codes in `FEATURES`): backtest log-loss 0.810→0.815.
+  Elo already encodes regional strength.
+- **A feature-driven XGBoost-Poisson expected-goals model as a third ensemble member** (nested blend
+  beta·DC + (1−beta)·gx): improved the goals side alone on validation (0.834→0.823) but regressed the
+  final blend (backtest 0.810→0.815) — it consumes the same features as the W/D/L classifier, so the
+  ensemble double-counts that view instead of gaining information.
 
 ## Known limitations
 Rates teams not lineups (no injuries/suspensions/xG/tactics). W/D/L models under-call draws (the Dixon-Coles

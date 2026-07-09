@@ -96,7 +96,8 @@ class Predictor:
         p_xgb = np.array(predict_symmetric(
             self.model, self.long, self.final_elo, home, away, self.asof, neutral, weight
         ))
-        M = model_goals.score_matrix(self.params, home, away, neutral=bool(neutral))
+        lam, mu = model_goals.rates(self.params, home, away, neutral=bool(neutral))
+        M = model_goals.matrix_from_rates(lam, mu, self.params["rho"])
         p_dc = np.array(model_goals.wdl_from_matrix(M))
 
         alpha = self.alpha if self.alpha_effective is None else self.alpha_effective
@@ -106,7 +107,9 @@ class Predictor:
 
         return {"p_home": float(p_home), "p_draw": float(p_draw),
                 "p_away": float(p_away), "score_matrix": M,
-                "p_xgb": [float(x) for x in p_xgb], "p_dc": [float(x) for x in p_dc]}
+                "p_xgb": [float(x) for x in p_xgb], "p_dc": [float(x) for x in p_dc],
+                # expected-goal rates, used by wcpred.simulate's extra-time model
+                "lam_home": float(lam), "lam_away": float(mu)}
 
 
 def _fit_calibrators(blended_val, y_val_arr, sample_weight=None):
