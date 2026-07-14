@@ -308,6 +308,13 @@ def parse_bracket(fixtures_path, results):
 
     wc = _raw_wc2026()
     knockout_wc = wc[wc["date"] >= FIRST_KNOCKOUT_DATE].sort_values("date", kind="stable").reset_index(drop=True)
+    # The feed pre-lists every knockout date up front, including later rounds
+    # (e.g. the 3rd-place match / final) whose participants aren't decided
+    # yet -- those rows carry NaN home_team/away_team, not real names. Such a
+    # row isn't actually "resolved"; excluding it here lets it fall through
+    # to the symbolic Winner/Runner-up resolution below instead of being
+    # treated as a concrete (but NaN) team.
+    knockout_wc = knockout_wc[knockout_wc["home_team"].notna() & knockout_wc["away_team"].notna()].reset_index(drop=True)
 
     # The live feed resolves knockout matchups (real team names, score NaN
     # until played) as soon as the preceding round finishes -- NOT just R32.
